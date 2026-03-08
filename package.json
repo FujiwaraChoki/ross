@@ -1,6 +1,6 @@
 {
   "name": "ross",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Desktop GUI for Codex with streaming chat, approvals, project context, and local voice transcription",
   "main": "./out/main/index.js",
   "author": "Sami Hindi <sami@samihindi.com>",

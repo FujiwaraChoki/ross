@@ -31,7 +31,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps): ReactElement
         className="flex flex-col items-center gap-8 no-drag"
       >
         <div className="flex flex-col items-center gap-3">
-          <img src="/logo.png" alt="Ross" className="w-14 h-14 rounded-2xl" />
+          <img src="./logo.png" alt="Ross" className="w-14 h-14 rounded-2xl" />
           <h1 className="text-xl font-medium text-foreground">Ross</h1>
           <p className="text-[13px] text-muted-foreground">Desktop Codex client</p>
         </div>

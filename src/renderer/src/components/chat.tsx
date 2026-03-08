@@ -1510,7 +1510,7 @@ export default function Chat(): ReactElement {
             className="flex flex-col items-center gap-3"
           >
             {/* Circular arrows icon */}
-            <img src="/logo.png" alt="Ross" className="w-16 h-16" />
+            <img src="./logo.png" alt="Ross" className="w-16 h-16" />
 
             {/* Heading */}
             <h1 className="text-2xl font-semibold text-foreground">Let&apos;s build</h1>

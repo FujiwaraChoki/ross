@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.0.0-blue?style=flat-square" />
+  <img alt="Version" src="https://img.shields.io/badge/version-1.0.1-blue?style=flat-square" />
   <img alt="Electron" src="https://img.shields.io/badge/electron-39-47848F?style=flat-square&logo=electron&logoColor=white" />
   <img alt="React" src="https://img.shields.io/badge/react-19-61DAFB?style=flat-square&logo=react&logoColor=black" />
   <img alt="TypeScript" src="https://img.shields.io/badge/typescript-5.9-3178C6?style=flat-square&logo=typescript&logoColor=white" />

@@ -66,7 +66,7 @@ export class CodexServer {
 
     // Initialize the connection
     this.initPromise = this.request('initialize', {
-      clientInfo: { name: 'ross-desktop', title: 'Ross', version: '1.0.0' }
+      clientInfo: { name: 'ross-desktop', title: 'Ross', version: '1.0.1' }
     })
       .then(() => this.notify('initialized', {}))
       .then(() => undefined)
