@@ -13,7 +13,7 @@ jobs:
       contents: read
 
     env:
-      CSC_NAME: 'Developer ID Application: SAMI HINDI (HL34V4TRZ5)'
+      CSC_NAME: 'SAMI HINDI (HL34V4TRZ5)'
 
     steps:
       - name: Check out repository
