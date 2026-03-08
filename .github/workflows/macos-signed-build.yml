@@ -14,6 +14,7 @@ jobs:
 
     env:
       CSC_NAME: 'SAMI HINDI (HL34V4TRZ5)'
+      APPLE_CODESIGN_IDENTITY: 'Developer ID Application: SAMI HINDI (HL34V4TRZ5)'
 
     steps:
       - name: Check out repository
@@ -91,6 +92,9 @@ jobs:
         env:
           CSC_KEY_PASSWORD: ${{ secrets.P12_PASSWORD }}
         run: pnpm build:mac
+
+      - name: Sign and notarize DMG artifacts
+        run: pnpm exec bash scripts/sign-and-notarize-dmg.sh dist/*.dmg
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4

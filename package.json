@@ -21,7 +21,7 @@
     "build:unpack": "pnpm run build && electron-builder --dir --publish never",
     "build:win": "pnpm run build && electron-builder --win --publish never",
     "build:mac": "electron-vite build && electron-builder --mac --publish never",
-    "build:mac:release": "APPLE_KEYCHAIN=\"$HOME/Library/Keychains/login.keychain-db\" APPLE_KEYCHAIN_PROFILE=ross-notary pnpm run build:mac",
+    "build:mac:release": "APPLE_KEYCHAIN=\"$HOME/Library/Keychains/login.keychain-db\" APPLE_KEYCHAIN_PROFILE=ross-notary pnpm run build:mac && APPLE_API_KEY=\"$HOME/.private_keys/ross-notary/AuthKey_RC53R8J822.p8\" APPLE_API_KEY_ID=RC53R8J822 APPLE_API_ISSUER=30af78f1-3c18-4a7c-9472-1274994b92f5 pnpm exec bash scripts/sign-and-notarize-dmg.sh dist/*.dmg",
     "build:linux": "electron-vite build && electron-builder --linux --publish never"
   },
   "dependencies": {
