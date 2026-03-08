@@ -1,0 +1,242 @@
+# Codex Integration Guide
+
+This document explains how Codex is integrated into this Electron app and how to safely extend it.
+
+## Goals
+
+- Keep all Codex transport and process logic in `main`.
+- Expose a minimal typed API to `renderer` via `preload`.
+- Keep UI state updates deterministic in a single Zustand store.
+- Support chat, command approvals, auth recovery, and skills discovery.
+
+## Architecture Overview
+
+```text
+Renderer (React + Zustand)
+  -> window.codex.* (preload bridge)
+    -> ipcMain handlers (main/index.ts)
+      -> CodexServer (main/codex-server.ts)
+        -> codex app-server (child process)
+          -> JSON-RPC notifications/events
+            -> main forwards as 'codex:event'
+              -> renderer event reducer in App.tsx
+```
+
+## Key Files
+
+- `src/main/index.ts`
+  - Electron bootstrapping.
+  - IPC handlers (`codex:*`).
+  - Starts/stops `CodexServer` with app lifecycle.
+- `src/main/codex-server.ts`
+  - Spawns `codex app-server`.
+  - Sends JSON-RPC requests and resolves pending promises.
+  - Forwards server notifications to renderer.
+  - Adds thread-remap recovery behavior.
+- `src/main/auth.ts`
+  - Login/auth check shell integration (`codex login`, `~/.codex/auth.json`).
+- `src/preload/index.ts`
+  - Secure bridge API exposed as `window.codex`.
+- `src/renderer/src/App.tsx`
+  - Central event handling for streamed turn/item updates.
+  - Auth bootstrap, server start, approval dialog wiring.
+- `src/renderer/src/lib/store.ts`
+  - Canonical app state (threads/messages/streaming/sidebar/tab/etc).
+- `src/renderer/src/components/chat.tsx`
+  - Chat input, model loading, turn start, thread bootstrap.
+- `src/renderer/src/components/skills-tab.tsx`
+  - Skills list UI powered by `skills/list`.
+
+## IPC Contract (`window.codex`)
+
+Current bridge methods in `src/preload/index.ts`:
+
+- Auth/session
+  - `isAuthenticated()`
+  - `login()`
+  - `startServer()`
+  - `stopServer()`
+- Thread/turn
+  - `threadStart(params)`
+  - `threadRead({ threadId, includeTurns? })`
+  - `threadList(params?)`
+  - `turnStart(params)`
+  - `turnInterrupt({ threadId, turnId })`
+- Metadata
+  - `modelList()`
+  - `mcpServerReload()`
+  - `mcpServerStatusList(params?)`
+  - `skillsList(params?)`
+  - `skillsConfigWrite({ path, enabled })`
+- Command approval
+  - `approveCommand(params)`
+  - `rejectCommand(params)`
+- Streaming events
+  - `onEvent(callback)` (subscribes to `'codex:event'`)
+
+## Startup and Auth Flow
+
+1. `App.tsx` calls `window.codex.isAuthenticated()`.
+2. If authenticated, renderer calls `window.codex.startServer()`.
+3. `CodexServer.start()` spawns `codex app-server` and runs:
+   - JSON-RPC `initialize`
+   - JSON-RPC notification `initialized`
+4. If stderr indicates token refresh/auth failure, main emits `auth/expired`.
+5. Renderer handles `auth/expired` by clearing streaming/approval state and returning to login UI.
+
+## Turn and Streaming Flow
+
+### Send message path
+
+1. `chat.tsx` ensures thread exists (`threadStart` if needed).
+2. It appends local user + assistant placeholder messages to store.
+3. It calls `turnStart({ threadId, model, input: [{ type: 'text', text }] })`.
+
+### Event path (`App.tsx`)
+
+`onEvent` handles the streaming lifecycle:
+
+- `turn/started`
+  - marks streaming true, captures current assistant message id, and stores the active `turnId`.
+- `item/started`
+  - creates structured items (`agentMessage`, `commandExecution`, etc.) under assistant message.
+- `item/agentMessage/delta`
+  - appends streamed text either into an active `agentMessage` item or fallback message content.
+- `item/commandExecution/outputDelta`
+  - appends command output chunks to the matching item.
+- `item/completed`
+  - marks item complete.
+- `item/commandExecution/requestApproval`
+  - opens approval dialog for shell commands.
+- `item/fileChange/requestApproval`
+  - opens approval dialog for patch application.
+- `turn/completed`
+  - marks streaming complete and clears the active turn context. Interrupted turns are surfaced via `turn.status === 'interrupted'`; failed turns can also include a top-level `error` payload that should be rendered to the user instead of failing silently.
+- `error`
+  - may precede a failed `turn/completed` and carries the same structured Codex error payload.
+
+### Approval protocol note
+
+Recent Codex app-server builds send approvals as server-initiated JSON-RPC requests, not just fire-and-forget notifications. That means the integration must:
+
+- forward the incoming request `id` from `main` to the renderer,
+- keep enough request context in UI state to answer later,
+- respond with a JSON-RPC result (`{ decision: 'accept' | 'decline' }`) when the user chooses.
+
+Legacy `command/approve` / `command/reject` notifications can remain as a fallback for older server builds, but the request/response path is the reliable one for current Codex integration.
+
+## Thread Remap Recovery
+
+Codex may remap thread IDs. This integration handles that in two places:
+
+- `CodexServer.threadStart()` emits `thread/remapped` when requested and actual IDs differ.
+- `CodexServer.turnStart()` retries on "thread not found" / "invalid thread id":
+  - creates a fresh thread,
+  - emits `thread/remapped`,
+  - retries `turn/start` with new id.
+
+Renderer receives `thread/remapped` and updates local store IDs via `remapThreadId`.
+
+## Skills Tab Integration
+
+### UI integration
+
+- `store.ts` defines `activeTab: 'threads' | 'skills'`.
+- Sidebar toggles between Threads and Skills.
+- `App.tsx` renders `<SkillsTab />` when `activeTab === 'skills'`.
+
+### Data integration
+
+- `main/index.ts` exposes `codex:skills-list`.
+- Handler forwards to JSON-RPC `skills/list` and defaults `cwds` to `[process.cwd()]` when omitted.
+- `skills-tab.tsx` calls `window.codex.skillsList({ forceReload })`, then renders per-workspace entries and skill cards.
+- `main/index.ts` also exposes `codex:skills-config-write`.
+- Handler forwards to JSON-RPC `skills/config/write` with `{ path, enabled }`.
+- `skills-tab.tsx` calls `window.codex.skillsConfigWrite(...)` when a switch is toggled and applies the returned `effectiveEnabled` state.
+
+## MCP Servers Integration
+
+- `main/index.ts` exposes `codex:mcp-server-reload` and `codex:mcp-server-status-list`.
+- Reload forwards to JSON-RPC `config/mcpServer/reload`.
+- Status listing forwards to JSON-RPC `mcpServerStatus/list`.
+- `settings-tab.tsx` reads `config.mcp_servers` from `config/read`, writes targeted edits with `config/batchWrite`, and reloads the MCP runtime after changes.
+
+## Adding a New Codex Endpoint (Recipe)
+
+When adding any new Codex RPC method, do all 4 steps:
+
+1. Main handler
+   - Add `ipcMain.handle('codex:your-method', ...)` in `src/main/index.ts`.
+   - Usually call `codexServer.request('rpc/method', params)`.
+2. Preload bridge
+   - Add a typed method in `src/preload/index.ts` that invokes the new IPC channel.
+3. Renderer callsite
+   - Use `window.codex.yourMethod(...)` from components/hooks.
+4. State updates
+   - If streaming notifications are involved, extend `App.tsx` event switch.
+
+If only command-like behavior is needed (no request/response), prefer `notify` with a dedicated IPC route.
+
+## State Model Notes
+
+`store.ts` stores:
+
+- Conversation entities: threads, messages, message items.
+- Session UI state: active thread/tab, model, autonomy level, streaming, sidebar, auth.
+- Approval state: pending approval request payload (commands and file changes).
+
+Persistence currently includes:
+
+- `threads`
+- `activeTab`
+- `model`
+- `autonomyLevel`
+- `isSidebarOpen`
+
+## Operational Notes and Gotchas
+
+- `CodexServer.request()` throws if app-server is not running; ensure server startup before calling data methods.
+- Thread creation can race if multiple send paths are added; keep one thread-bootstrap path.
+- Be careful when mutating nested store structures; preserve immutability for React updates.
+- `onEvent` in `App.tsx` is the canonical reducer; avoid duplicating stream handling elsewhere.
+- For skills listing, prefer explicit `cwds` if multi-workspace support is introduced.
+
+## Troubleshooting Quick Checks
+
+- Login issues:
+  - Verify `~/.codex/auth.json` exists.
+  - Re-run `codex login`.
+- No model/skills data:
+  - Confirm `window.codex.startServer()` resolved.
+  - Check app-server process spawn (`codex` on PATH).
+- Stuck streaming:
+  - Ensure `turn/completed` is being received.
+  - If the server exits mid-turn, ensure `server/stopped` or equivalent cleanup reaches renderer so `isStreaming` is cleared.
+  - Verify active thread/message IDs are valid.
+- Command approval not showing:
+  - Confirm event `item/commandExecution/requestApproval` reaches renderer.
+  - Confirm file edit approvals (`item/fileChange/requestApproval`) are also handled.
+  - If approval reaches renderer but the turn still does not continue, verify the client is replying to the server request id instead of only sending a side-channel notify.
+
+## Reference: Events Currently Handled in Renderer
+
+- `turn/started`
+- `item/agentMessage/delta`
+- `item/started`
+- `item/completed`
+- `item/commandExecution/outputDelta`
+- `item/commandExecution/requestApproval`
+- `item/fileChange/requestApproval`
+- `turn/completed`
+- `error`
+- `auth/expired`
+- `server/error`
+- `server/stopped`
+- `thread/remapped`
+
+## Suggested Future Improvements
+
+- Add explicit TypeScript interfaces for all RPC result payloads in a shared `types/codex.ts` file.
+- Add integration tests for event reducer behavior in `App.tsx`.
+- Add lightweight telemetry for start/stop/errors in `CodexServer`.
+- Add pagination/filter/search to Skills tab when skill counts grow.
