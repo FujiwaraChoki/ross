@@ -4,6 +4,8 @@ import { useCodexStore } from '@/lib/store'
 interface Model {
   id: string
   name?: string
+  displayName?: string
+  hidden?: boolean
 }
 
 export default function ModelSelector(): ReactElement {
@@ -14,17 +16,18 @@ export default function ModelSelector(): ReactElement {
     void window.codex
       .modelList()
       .then((result) => {
-        const data = result as { models?: Model[] }
-        if (data?.models) {
-          setModels(data.models)
+        const res = result as { data?: Model[]; models?: Model[] }
+        const list = res?.data ?? res?.models
+        if (list) {
+          setModels(list.filter((m) => !m.hidden))
         }
       })
       .catch(() => {
         // Fallback models if server isn't ready.
         setModels([
-          { id: 'o4-mini', name: 'o4-mini' },
-          { id: 'o3', name: 'o3' },
-          { id: 'codex-mini', name: 'codex-mini' }
+          { id: 'gpt-5.3-codex', name: 'gpt-5.3-codex' },
+          { id: 'gpt-5.4', name: 'gpt-5.4' },
+          { id: 'gpt-5.3-codex-spark', name: 'GPT-5.3-Codex-Spark' }
         ])
       })
   }, [])
@@ -39,7 +42,7 @@ export default function ModelSelector(): ReactElement {
         {models.length > 0 ? (
           models.map((m) => (
             <option key={m.id} value={m.id}>
-              {m.name || m.id}
+              {m.displayName || m.name || m.id}
             </option>
           ))
         ) : (

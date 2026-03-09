@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect, useRef, type ReactElement } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Pin, Trash2, Folder, ChevronDown, SquarePen, LayoutGrid } from 'lucide-react'
+import { Pin, Trash2, Folder, SquarePen, LayoutGrid } from 'lucide-react'
 import { ANIMATION_EASE } from '@/lib/animations'
 import { useCodexStore, timeAgo, type Thread } from '@/lib/store'
 import { useResizableSidebar } from '@/lib/use-resizable-sidebar'
@@ -15,6 +15,18 @@ function getThreadIdFromThreadStartResult(result: unknown): string | null {
   if (typeof maybeThread !== 'object' || maybeThread === null) return null
   const maybeId = (maybeThread as { id?: unknown }).id
   return typeof maybeId === 'string' && maybeId ? maybeId : null
+}
+
+function ProjectRowIcon({ iconDataUrl }: { iconDataUrl?: string | null }): ReactElement {
+  if (!iconDataUrl) {
+    return <Folder className="w-3.5 h-3.5 text-sidebar-muted shrink-0" strokeWidth={1.75} />
+  }
+
+  return (
+    <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center overflow-hidden rounded-[4px] bg-sidebar-accent/70 ring-1 ring-sidebar-border/60">
+      <img src={iconDataUrl} alt="" className="h-full w-full object-cover" />
+    </span>
+  )
 }
 
 export default function AppSidebar(): ReactElement {
@@ -41,6 +53,7 @@ export default function AppSidebar(): ReactElement {
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
   const [showAllGroups, setShowAllGroups] = useState<Record<string, boolean>>({})
   const [projectMenuOpen, setProjectMenuOpen] = useState(false)
+  const [projectIcons, setProjectIcons] = useState<Record<string, string | null>>({})
   const projectMenuRef = useRef<HTMLDivElement>(null)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null)
   const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -209,6 +222,72 @@ export default function AppSidebar(): ReactElement {
     }
   }, [threads])
 
+  const projectMetaByName = useMemo(() => {
+    const next: Record<string, { path?: string }> = {}
+
+    const registerProject = (name?: string, path?: string): void => {
+      if (!name || name === 'local' || !path || next[name]?.path) return
+      next[name] = { path }
+    }
+
+    registerProject(activeProject?.name, activeProject?.path)
+    recentProjects.forEach((project) => registerProject(project.name, project.path))
+    threads.forEach((thread) => registerProject(thread.project, thread.projectPath))
+
+    return next
+  }, [activeProject, recentProjects, threads])
+
+  const projectPathsToLoad = useMemo(
+    () => [
+      ...new Set(
+        Object.values(projectMetaByName).flatMap((project) => (project.path ? [project.path] : []))
+      )
+    ],
+    [projectMetaByName]
+  )
+
+  useEffect(() => {
+    const missingPaths = projectPathsToLoad.filter((path) => projectIcons[path] === undefined)
+    if (missingPaths.length === 0) return
+
+    let cancelled = false
+
+    void Promise.all(
+      missingPaths.map(async (path) => [path, await window.codex.getProjectIcon(path)] as const)
+    )
+      .then((entries) => {
+        if (cancelled) return
+
+        setProjectIcons((prev) => {
+          const next = { ...prev }
+          let changed = false
+
+          for (const [path, iconDataUrl] of entries) {
+            if (next[path] !== undefined) continue
+            next[path] = iconDataUrl
+            changed = true
+          }
+
+          return changed ? next : prev
+        })
+      })
+      .catch((error) => {
+        console.error('Failed to load project icons:', error)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [projectIcons, projectPathsToLoad])
+
+  const getProjectPath = (projectName: string): string | undefined =>
+    projectMetaByName[projectName]?.path
+
+  const getProjectIcon = (projectName: string): string | null => {
+    const projectPath = getProjectPath(projectName)
+    return projectPath ? (projectIcons[projectPath] ?? null) : null
+  }
+
   const renderThreadRow = (thread: Thread): ReactElement => {
     const isActive = thread.id === activeThreadId
     const isThreadStreaming = thread.messages.some((message) => message.isStreaming)
@@ -360,6 +439,7 @@ export default function AppSidebar(): ReactElement {
                   const isCollapsed = collapsedGroups[key]
                   const isShowingAll = showAllGroups[key]
                   const hasMore = projectThreads.length > MAX_VISIBLE_THREADS
+                  const projectIcon = getProjectIcon(project)
                   const visibleThreads =
                     hasMore && !isShowingAll
                       ? projectThreads.slice(0, MAX_VISIBLE_THREADS)
@@ -371,35 +451,8 @@ export default function AppSidebar(): ReactElement {
                         className="group/project no-drag flex items-center gap-2 px-2.5 pt-1 pb-1 mb-1 w-full hover:bg-sidebar-hover rounded-md transition-colors cursor-pointer"
                         onClick={() => toggleCollapsed(key)}
                       >
-                        <div className="w-3 h-3 relative shrink-0">
-                          <AnimatePresence initial={false} mode="wait">
-                            {isCollapsed ? (
-                              <motion.div
-                                key="folder"
-                                initial={{ opacity: 0, scale: 0.8 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                exit={{ opacity: 0, scale: 0.8 }}
-                                transition={{ duration: 0.15, ease: ANIMATION_EASE }}
-                                className="absolute inset-0"
-                              >
-                                <Folder className="w-3 h-3 text-sidebar-muted" strokeWidth={1.75} />
-                              </motion.div>
-                            ) : (
-                              <motion.div
-                                key="chevron"
-                                initial={{ opacity: 0, scale: 0.8 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                exit={{ opacity: 0, scale: 0.8 }}
-                                transition={{ duration: 0.15, ease: ANIMATION_EASE }}
-                                className="absolute inset-0"
-                              >
-                                <ChevronDown
-                                  className="w-3 h-3 text-sidebar-muted"
-                                  strokeWidth={1.75}
-                                />
-                              </motion.div>
-                            )}
-                          </AnimatePresence>
+                        <div className="shrink-0">
+                          <ProjectRowIcon iconDataUrl={projectIcon} />
                         </div>
                         <span className="text-[13px] font-medium text-sidebar-foreground truncate select-none">
                           {project}
@@ -407,9 +460,7 @@ export default function AppSidebar(): ReactElement {
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
-                            const projectPath =
-                              recentProjects.find((p) => p.name === project)?.path ||
-                              (activeProject?.name === project ? activeProject.path : undefined)
+                            const projectPath = getProjectPath(project)
                             void handleNewThread(project, projectPath)
                           }}
                           className="opacity-0 group-hover/project:opacity-100 ml-auto p-0.5 hover:bg-sidebar-active rounded transition-all"
@@ -458,6 +509,7 @@ export default function AppSidebar(): ReactElement {
                       const isCollapsed = collapsedGroups[key]
                       const isShowingAll = showAllGroups[key]
                       const hasMore = projectThreads.length > MAX_VISIBLE_THREADS
+                      const projectIcon = getProjectIcon(project)
                       const visibleThreads =
                         hasMore && !isShowingAll
                           ? projectThreads.slice(0, MAX_VISIBLE_THREADS)
@@ -469,38 +521,8 @@ export default function AppSidebar(): ReactElement {
                             onClick={() => toggleCollapsed(key)}
                             className="no-drag flex items-center gap-2 px-2.5 pt-1 pb-1 mb-1 w-full hover:bg-sidebar-hover rounded-md transition-colors"
                           >
-                            <div className="w-3 h-3 relative shrink-0">
-                              <AnimatePresence initial={false} mode="wait">
-                                {isCollapsed ? (
-                                  <motion.div
-                                    key="folder"
-                                    initial={{ opacity: 0, scale: 0.8 }}
-                                    animate={{ opacity: 1, scale: 1 }}
-                                    exit={{ opacity: 0, scale: 0.8 }}
-                                    transition={{ duration: 0.15, ease: ANIMATION_EASE }}
-                                    className="absolute inset-0"
-                                  >
-                                    <Folder
-                                      className="w-3 h-3 text-sidebar-muted"
-                                      strokeWidth={1.75}
-                                    />
-                                  </motion.div>
-                                ) : (
-                                  <motion.div
-                                    key="chevron"
-                                    initial={{ opacity: 0, scale: 0.8 }}
-                                    animate={{ opacity: 1, scale: 1 }}
-                                    exit={{ opacity: 0, scale: 0.8 }}
-                                    transition={{ duration: 0.15, ease: ANIMATION_EASE }}
-                                    className="absolute inset-0"
-                                  >
-                                    <ChevronDown
-                                      className="w-3 h-3 text-sidebar-muted"
-                                      strokeWidth={1.75}
-                                    />
-                                  </motion.div>
-                                )}
-                              </AnimatePresence>
+                            <div className="shrink-0">
+                              <ProjectRowIcon iconDataUrl={projectIcon} />
                             </div>
                             <span className="text-[13px] font-medium text-sidebar-foreground">
                               {project}

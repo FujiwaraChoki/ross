@@ -151,7 +151,8 @@ Renderer receives `thread/remapped` and updates local store IDs via `remapThread
 - Handler forwards to JSON-RPC `skills/list` and defaults `cwds` to `[process.cwd()]` when omitted.
 - `skills-tab.tsx` calls `window.codex.skillsList({ forceReload })`, then renders per-workspace entries and skill cards.
 - `main/index.ts` also exposes `codex:skills-config-write`.
-- Handler forwards to JSON-RPC `skills/config/write` with `{ path, enabled }`.
+- Handler tries JSON-RPC `skills/config/write` with `{ path, enabled }`, then falls back to `config/read` + `config/batchWrite` for older backends that only expose generic config write methods.
+- Fallback persistence mirrors Codex's current config shape: `[[skills.config]]` entries with `path` and `enabled`.
 - `skills-tab.tsx` calls `window.codex.skillsConfigWrite(...)` when a switch is toggled and applies the returned `effectiveEnabled` state.
 
 ## MCP Servers Integration

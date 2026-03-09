@@ -1,5 +1,11 @@
+import { fixPath } from './fix-path'
+
+// Must run before any child process is spawned so `codex`, `git`, etc. are on PATH
+// when the app is launched from Finder (macOS GUI apps get a minimal PATH).
+fixPath()
+
 import { app, shell, BrowserWindow, ipcMain, dialog, powerSaveBlocker, session } from 'electron'
-import { basename, dirname, join, relative, sep } from 'path'
+import { basename, dirname, extname, join, relative, sep } from 'path'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
 import { mkdir, writeFile, readFile, readdir, stat } from 'fs/promises'
@@ -28,7 +34,68 @@ interface ProjectFileEntry {
   directory: string
 }
 
+interface CodexConfigLayer {
+  name?: {
+    type?: string | null
+    file?: string | null
+  } | null
+  version?: string | null
+}
+
+interface CodexConfigReadResult {
+  config?: {
+    skills?: Record<string, unknown> | null
+  } | null
+  layers?: CodexConfigLayer[] | null
+}
+
+interface SkillsConfigWriteParams {
+  path: string
+  enabled: boolean
+}
+
+interface SkillsConfigEntry {
+  path: string
+  enabled: boolean
+}
+
 const MAX_PROJECT_FILE_REFERENCES = 10000
+const PROJECT_ICON_CANDIDATES = [
+  'favicon.ico',
+  'favicon.png',
+  'favicon.svg',
+  'icon.png',
+  'icon.svg',
+  'public/favicon.ico',
+  'public/favicon.png',
+  'public/favicon.svg',
+  'public/icon.png',
+  'public/icon.svg',
+  'src/app/favicon.ico',
+  'src/app/favicon.png',
+  'src/app/favicon.svg',
+  'src/app/icon.png',
+  'src/app/icon.svg',
+  'app/favicon.ico',
+  'app/favicon.png',
+  'app/favicon.svg',
+  'app/icon.png',
+  'app/icon.svg',
+  'src/favicon.ico',
+  'src/favicon.png',
+  'src/favicon.svg',
+  'src/icon.png',
+  'src/icon.svg'
+] as const
+const PROJECT_ICON_MIME_TYPES: Record<string, string> = {
+  '.ico': 'image/x-icon',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml'
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
 
 function toPositiveInteger(value: string | undefined): number | undefined {
   if (!value) return undefined
@@ -292,6 +359,122 @@ async function resolveProjectRootPath(projectPath: unknown): Promise<string> {
   return process.cwd()
 }
 
+async function resolveProjectIcon(projectPath: unknown): Promise<string | null> {
+  const rootPath = await resolveProjectRootPath(projectPath)
+
+  for (const candidate of PROJECT_ICON_CANDIDATES) {
+    const iconPath = join(rootPath, candidate)
+
+    try {
+      const info = await stat(iconPath)
+      if (!info.isFile()) continue
+
+      const mimeType = PROJECT_ICON_MIME_TYPES[extname(iconPath).toLowerCase()]
+      if (!mimeType) continue
+
+      const file = await readFile(iconPath)
+      return `data:${mimeType};base64,${file.toString('base64')}`
+    } catch {
+      continue
+    }
+  }
+
+  return null
+}
+
+function normalizeSkillsConfigEntries(value: unknown): SkillsConfigEntry[] {
+  if (!Array.isArray(value)) return []
+
+  return value.flatMap((entry) => {
+    if (!isRecord(entry)) return []
+    const path = entry.path
+    const enabled = entry.enabled
+    if (typeof path !== 'string' || typeof enabled !== 'boolean') return []
+    return [{ path, enabled }]
+  })
+}
+
+function getConfigWriteTarget(result: CodexConfigReadResult): {
+  filePath: string | null
+  version: string | null
+} {
+  for (const layer of result.layers || []) {
+    if (layer?.name?.type === 'user' && typeof layer.name.file === 'string') {
+      return {
+        filePath: layer.name.file,
+        version: typeof layer.version === 'string' ? layer.version : null
+      }
+    }
+  }
+
+  return { filePath: null, version: null }
+}
+
+function shouldFallbackSkillsConfigWrite(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? error.message.toLowerCase()
+      : typeof error === 'string'
+        ? error.toLowerCase()
+        : ''
+
+  return (
+    (message.includes('skills/config/write') && message.includes('unknown variant')) ||
+    message.includes('method not found') ||
+    message.includes('unknown method')
+  )
+}
+
+async function writeSkillsConfigFallback(params: SkillsConfigWriteParams): Promise<unknown> {
+  const configReadResult = (await codexServer.request('config/read', {
+    includeLayers: true
+  })) as CodexConfigReadResult
+
+  const skillsConfig = isRecord(configReadResult?.config?.skills)
+    ? configReadResult.config.skills
+    : null
+  const nextEntries = normalizeSkillsConfigEntries(skillsConfig?.config).filter(
+    (entry) => entry.path !== params.path
+  )
+
+  if (!params.enabled) {
+    nextEntries.push({ path: params.path, enabled: false })
+  }
+
+  const hasOtherSkillsSettings = Object.entries(skillsConfig || {}).some(
+    ([key, value]) => key !== 'config' && value !== null && value !== undefined
+  )
+
+  const edits =
+    nextEntries.length > 0 || hasOtherSkillsSettings
+      ? [
+          {
+            keyPath: 'skills.config',
+            value: nextEntries,
+            mergeStrategy: 'replace' as const
+          }
+        ]
+      : [
+          {
+            keyPath: 'skills',
+            value: null,
+            mergeStrategy: 'replace' as const
+          }
+        ]
+
+  const target = getConfigWriteTarget(configReadResult)
+  const writeResult = await codexServer.request('config/batchWrite', {
+    edits,
+    filePath: target.filePath,
+    expectedVersion: target.version
+  })
+
+  return {
+    ...(isRecord(writeResult) ? writeResult : {}),
+    effectiveEnabled: params.enabled
+  }
+}
+
 function createWindow(): BrowserWindow {
   const vibrancySupported = process.platform === 'darwin'
   const titleBarHeight = 44
@@ -450,9 +633,26 @@ app.whenReady().then(() => {
     return codexServer.request('skills/list', requestParams)
   })
 
-  ipcMain.handle('codex:skills-config-write', (_, params) =>
-    codexServer.request('skills/config/write', params || {})
-  )
+  ipcMain.handle('codex:skills-config-write', async (_, params) => {
+    const path = isRecord(params) && typeof params.path === 'string' ? params.path : ''
+    const enabled = isRecord(params) && typeof params.enabled === 'boolean' ? params.enabled : null
+
+    if (!path || enabled === null) {
+      throw new Error('Invalid skills config write request')
+    }
+
+    const requestParams = { path, enabled }
+
+    try {
+      return await codexServer.request('skills/config/write', requestParams)
+    } catch (error) {
+      if (!shouldFallbackSkillsConfigWrite(error)) {
+        throw error
+      }
+
+      return writeSkillsConfigFallback(requestParams)
+    }
+  })
 
   ipcMain.handle('codex:open-project', async () => {
     const result = await dialog.showOpenDialog(win, {
@@ -469,6 +669,10 @@ app.whenReady().then(() => {
     const rootPath = await resolveProjectRootPath(projectPath)
     return listProjectFiles(rootPath)
   })
+
+  ipcMain.handle('codex:get-project-icon', async (_, projectPath: string) =>
+    resolveProjectIcon(projectPath)
+  )
 
   ipcMain.handle('codex:open-config-file', async () => {
     const configPath = join(homedir(), '.codex', 'config.toml')

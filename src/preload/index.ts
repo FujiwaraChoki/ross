@@ -76,6 +76,8 @@ const codexApi = {
     files: { path: string; name: string; relativePath: string; directory: string }[]
     truncated: boolean
   }> => ipcRenderer.invoke('codex:list-project-files', projectPath),
+  getProjectIcon: (projectPath: string): Promise<string | null> =>
+    ipcRenderer.invoke('codex:get-project-icon', projectPath),
   openAttachments: (): Promise<{ path: string; name: string }[] | null> =>
     ipcRenderer.invoke('codex:open-attachments'),
   openPath: (path: string): Promise<void> => ipcRenderer.invoke('codex:open-path', path),

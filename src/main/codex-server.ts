@@ -39,7 +39,7 @@ export class CodexServer {
     })
 
     this.proc.on('error', (err) => {
-      console.error('Failed to start codex app-server:', err)
+      console.error('[codex] Failed to start codex app-server:', err)
       this.win?.webContents.send('codex:event', {
         method: 'server/error',
         params: { message: err.message }
