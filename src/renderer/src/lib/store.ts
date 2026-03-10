@@ -1,5 +1,4 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
 import {
   BUILT_IN_THEMES,
   DEFAULT_THEME_ID,
@@ -518,519 +517,501 @@ export function buildPersistedCodexStoreState(
   }
 }
 
-export const useCodexStore = create<CodexStore>()(
-  persist(
-    (set, get) => ({
-      threads: [],
-      tasksByThreadId: {},
-      activeThreadId: null,
-      activeTab: 'threads',
-      activeProject: null,
-      recentProjects: [],
-      model: 'gpt-5.3-codex',
-      reasoningEffort: null,
-      autonomyLevel: 'Hand off',
-      isStreaming: false,
-      streamingThreadId: null,
-      isSidebarOpen: true,
-      isAuthenticated: false,
-      serverReady: false,
-      availableModels: [],
-      approvalRequest: null,
-      activeTurnThreadId: null,
-      activeTurnId: null,
-      activeTurnMode: null,
-      activeTurnPlan: null,
-      planModeEnabled: false,
-      isPlanSheetOpen: false,
-      selectedPlanPath: null,
-      themes: BUILT_IN_THEMES,
-      settings: {
-        defaultOpenDestination: 'zed',
-        language: 'auto',
-        threadDetail: 'steps_with_code_commands',
-        preventSleepWhileRunning: false,
-        requireMetaForMultiline: true,
-        speed: 'standard',
-        followUpBehavior: 'queue',
-        themeId: DEFAULT_THEME_ID,
-        themeMode: 'system',
-        opaqueWindowBackground: false,
-        chatSidebarWidth: 260,
-        settingsSidebarWidth: 248,
-        pointerCursors: true,
-        sansFontSize: 14,
-        sansFontFamily: 'System',
-        codeFontSize: 13,
-        codeFontFamily: 'SF Mono',
-        notificationChime: true,
-        personality: 'friendly',
-        customInstructions: ''
-      },
+export const useCodexStore = create<CodexStore>()((set, get) => ({
+  threads: [],
+  tasksByThreadId: {},
+  activeThreadId: null,
+  activeTab: 'threads',
+  activeProject: null,
+  recentProjects: [],
+  model: 'gpt-5.3-codex',
+  reasoningEffort: null,
+  autonomyLevel: 'Hand off',
+  isStreaming: false,
+  streamingThreadId: null,
+  isSidebarOpen: true,
+  isAuthenticated: false,
+  serverReady: false,
+  availableModels: [],
+  approvalRequest: null,
+  activeTurnThreadId: null,
+  activeTurnId: null,
+  activeTurnMode: null,
+  activeTurnPlan: null,
+  planModeEnabled: false,
+  isPlanSheetOpen: false,
+  selectedPlanPath: null,
+  themes: BUILT_IN_THEMES,
+  settings: {
+    defaultOpenDestination: 'zed',
+    language: 'auto',
+    threadDetail: 'steps_with_code_commands',
+    preventSleepWhileRunning: false,
+    requireMetaForMultiline: true,
+    speed: 'standard',
+    followUpBehavior: 'queue',
+    themeId: DEFAULT_THEME_ID,
+    themeMode: 'system',
+    opaqueWindowBackground: false,
+    chatSidebarWidth: 260,
+    settingsSidebarWidth: 248,
+    pointerCursors: true,
+    sansFontSize: 14,
+    sansFontFamily: 'System',
+    codeFontSize: 13,
+    codeFontFamily: 'SF Mono',
+    notificationChime: true,
+    personality: 'friendly',
+    customInstructions: ''
+  },
 
-      setActiveProject: (project) =>
-        set((state) => {
-          if (!project) return { activeProject: null }
-          const exists = state.recentProjects.some((p) => p.path === project.path)
-          return {
-            activeProject: project,
-            recentProjects: exists
-              ? state.recentProjects
-              : [project, ...state.recentProjects].slice(0, 10)
-          }
-        }),
+  setActiveProject: (project) =>
+    set((state) => {
+      if (!project) return { activeProject: null }
+      const exists = state.recentProjects.some((p) => p.path === project.path)
+      return {
+        activeProject: project,
+        recentProjects: exists
+          ? state.recentProjects
+          : [project, ...state.recentProjects].slice(0, 10)
+      }
+    }),
 
-      createThread: (id, title, project, projectPath) =>
-        set((state) => ({
-          threads: [
-            {
-              id,
-              title: title || 'New Thread',
-              project: project || state.activeProject?.name || 'local',
-              projectPath: projectPath || state.activeProject?.path,
-              createdAt: Date.now(),
-              messages: [],
-              pinned: false,
-              unread: false,
-              archived: false
-            },
-            ...state.threads
-          ],
-          tasksByThreadId: {
-            ...state.tasksByThreadId,
-            [id]: state.tasksByThreadId[id] || []
-          },
-          activeThreadId: id
-        })),
-
-      remapThreadId: (fromId, toId) => {
-        if (!fromId || !toId || fromId === toId) return
-        set((state) => {
-          if (state.threads.some((t) => t.id === toId)) {
-            return {
-              threads: state.threads.filter((t) => t.id !== fromId),
-              activeThreadId: state.activeThreadId === fromId ? toId : state.activeThreadId,
-              streamingThreadId:
-                state.streamingThreadId === fromId ? toId : state.streamingThreadId,
-              activeTurnThreadId:
-                state.activeTurnThreadId === fromId ? toId : state.activeTurnThreadId,
-              tasksByThreadId: Object.fromEntries(
-                Object.entries(state.tasksByThreadId)
-                  .filter(([threadId]) => threadId !== fromId)
-                  .map(([threadId, tasks]) => [threadId === fromId ? toId : threadId, tasks])
-              ),
-              approvalRequest:
-                state.approvalRequest?.threadId === fromId
-                  ? { ...state.approvalRequest, threadId: toId }
-                  : state.approvalRequest
-            }
-          }
-
-          return {
-            threads: state.threads.map((t) => (t.id === fromId ? { ...t, id: toId } : t)),
-            activeThreadId: state.activeThreadId === fromId ? toId : state.activeThreadId,
-            streamingThreadId: state.streamingThreadId === fromId ? toId : state.streamingThreadId,
-            activeTurnThreadId:
-              state.activeTurnThreadId === fromId ? toId : state.activeTurnThreadId,
-            tasksByThreadId: Object.fromEntries(
-              Object.entries(state.tasksByThreadId).map(([threadId, tasks]) => [
-                threadId === fromId ? toId : threadId,
-                tasks.map((task) => (task.threadId === fromId ? { ...task, threadId: toId } : task))
-              ])
-            ),
-            approvalRequest:
-              state.approvalRequest?.threadId === fromId
-                ? { ...state.approvalRequest, threadId: toId }
-                : state.approvalRequest
-          }
-        })
-      },
-
-      setActiveThread: (id) =>
-        set((state) => ({
-          activeThreadId: id,
-          threads:
-            id == null
-              ? state.threads
-              : state.threads.map((t) => (t.id === id ? { ...t, unread: false } : t))
-        })),
-      setActiveTab: (activeTab) => set({ activeTab }),
-
-      deleteThread: (id) =>
-        set((state) => ({
-          threads: state.threads.filter((t) => t.id !== id),
-          tasksByThreadId: Object.fromEntries(
-            Object.entries(state.tasksByThreadId).filter(([threadId]) => threadId !== id)
-          ),
-          activeThreadId: state.activeThreadId === id ? null : state.activeThreadId
-        })),
-
-      updateThreadTitle: (id, title) =>
-        set((state) => ({
-          threads: state.threads.map((t) => (t.id === id ? { ...t, title } : t))
-        })),
-
-      toggleThreadPinned: (id) =>
-        set((state) => ({
-          threads: state.threads.map((t) => {
-            if (t.id !== id) return t
-            const nextPinned = !t.pinned
-            return {
-              ...t,
-              pinned: nextPinned,
-              pinnedOrder: nextPinned ? Date.now() : undefined,
-              archived: nextPinned ? false : t.archived
-            }
-          })
-        })),
-
-      reorderPinnedThreads: (orderedIds) =>
-        set((state) => ({
-          threads: state.threads.map((t) => {
-            const index = orderedIds.indexOf(t.id)
-            if (index === -1) return t
-            return { ...t, pinnedOrder: index }
-          })
-        })),
-
-      setThreadArchived: (id, archived) =>
-        set((state) => {
-          const threads = state.threads.map((t) =>
-            t.id === id
-              ? {
-                  ...t,
-                  archived,
-                  pinned: archived ? false : t.pinned
-                }
-              : t
-          )
-          const activeThreadId =
-            archived && state.activeThreadId === id
-              ? (threads.find((t) => !t.archived)?.id ?? null)
-              : state.activeThreadId
-          return { threads, activeThreadId }
-        }),
-
-      markThreadUnread: (id, unread) =>
-        set((state) => ({
-          threads: state.threads.map((t) => (t.id === id ? { ...t, unread } : t))
-        })),
-
-      cloneThread: (id, project, projectPath) => {
-        const source = get().threads.find((t) => t.id === id)
-        if (!source) return null
-        const clonedId = crypto.randomUUID()
-        const clonedThread: Thread = {
-          ...source,
-          id: clonedId,
-          title: `${source.title} (fork)`,
-          project: project || source.project || 'local',
-          projectPath: projectPath ?? source.projectPath,
+  createThread: (id, title, project, projectPath) =>
+    set((state) => ({
+      threads: [
+        {
+          id,
+          title: title || 'New Thread',
+          project: project || state.activeProject?.name || 'local',
+          projectPath: projectPath || state.activeProject?.path,
           createdAt: Date.now(),
-          messages: source.messages.map((message) => ({
-            ...message,
-            items: message.items.map((item) => ({ ...item }))
-          })),
+          messages: [],
           pinned: false,
           unread: false,
           archived: false
-        }
-
-        set((state) => ({
-          threads: [clonedThread, ...state.threads],
-          tasksByThreadId: {
-            ...state.tasksByThreadId,
-            [clonedId]: []
-          },
-          activeThreadId: clonedId
-        }))
-
-        return clonedId
+        },
+        ...state.threads
+      ],
+      tasksByThreadId: {
+        ...state.tasksByThreadId,
+        [id]: state.tasksByThreadId[id] || []
       },
+      activeThreadId: id
+    })),
 
-      replaceThreads: (threads) =>
-        set((state) => ({
-          threads,
-          activeThreadId:
-            state.activeThreadId && threads.some((thread) => thread.id === state.activeThreadId)
-              ? state.activeThreadId
-              : (threads[0]?.id ?? null)
-        })),
+  remapThreadId: (fromId, toId) => {
+    if (!fromId || !toId || fromId === toId) return
+    set((state) => {
+      if (state.threads.some((t) => t.id === toId)) {
+        return {
+          threads: state.threads.filter((t) => t.id !== fromId),
+          activeThreadId: state.activeThreadId === fromId ? toId : state.activeThreadId,
+          streamingThreadId: state.streamingThreadId === fromId ? toId : state.streamingThreadId,
+          activeTurnThreadId: state.activeTurnThreadId === fromId ? toId : state.activeTurnThreadId,
+          tasksByThreadId: Object.fromEntries(
+            Object.entries(state.tasksByThreadId)
+              .filter(([threadId]) => threadId !== fromId)
+              .map(([threadId, tasks]) => [threadId === fromId ? toId : threadId, tasks])
+          ),
+          approvalRequest:
+            state.approvalRequest?.threadId === fromId
+              ? { ...state.approvalRequest, threadId: toId }
+              : state.approvalRequest
+        }
+      }
 
-      replaceTasksByThread: (tasksByThreadId) => set({ tasksByThreadId }),
+      return {
+        threads: state.threads.map((t) => (t.id === fromId ? { ...t, id: toId } : t)),
+        activeThreadId: state.activeThreadId === fromId ? toId : state.activeThreadId,
+        streamingThreadId: state.streamingThreadId === fromId ? toId : state.streamingThreadId,
+        activeTurnThreadId: state.activeTurnThreadId === fromId ? toId : state.activeTurnThreadId,
+        tasksByThreadId: Object.fromEntries(
+          Object.entries(state.tasksByThreadId).map(([threadId, tasks]) => [
+            threadId === fromId ? toId : threadId,
+            tasks.map((task) => (task.threadId === fromId ? { ...task, threadId: toId } : task))
+          ])
+        ),
+        approvalRequest:
+          state.approvalRequest?.threadId === fromId
+            ? { ...state.approvalRequest, threadId: toId }
+            : state.approvalRequest
+      }
+    })
+  },
 
-      setTasksForThread: (threadId, tasks) =>
-        set((state) => ({
-          tasksByThreadId: {
-            ...state.tasksByThreadId,
-            [threadId]: tasks
-          }
-        })),
+  setActiveThread: (id) =>
+    set((state) => ({
+      activeThreadId: id,
+      threads:
+        id == null
+          ? state.threads
+          : state.threads.map((t) => (t.id === id ? { ...t, unread: false } : t))
+    })),
+  setActiveTab: (activeTab) => set({ activeTab }),
 
-      upsertTask: (threadId, task) =>
-        set((state) => {
-          const existingTasks = state.tasksByThreadId[threadId] || []
-          const alreadyExists = existingTasks.some((entry) => entry.id === task.id)
-          return {
-            tasksByThreadId: {
-              ...state.tasksByThreadId,
-              [threadId]: alreadyExists
-                ? existingTasks.map((entry) =>
-                    entry.id === task.id ? { ...entry, ...task } : entry
-                  )
-                : [...existingTasks, task]
+  deleteThread: (id) =>
+    set((state) => ({
+      threads: state.threads.filter((t) => t.id !== id),
+      tasksByThreadId: Object.fromEntries(
+        Object.entries(state.tasksByThreadId).filter(([threadId]) => threadId !== id)
+      ),
+      activeThreadId: state.activeThreadId === id ? null : state.activeThreadId
+    })),
+
+  updateThreadTitle: (id, title) =>
+    set((state) => ({
+      threads: state.threads.map((t) => (t.id === id ? { ...t, title } : t))
+    })),
+
+  toggleThreadPinned: (id) =>
+    set((state) => ({
+      threads: state.threads.map((t) => {
+        if (t.id !== id) return t
+        const nextPinned = !t.pinned
+        return {
+          ...t,
+          pinned: nextPinned,
+          pinnedOrder: nextPinned ? Date.now() : undefined,
+          archived: nextPinned ? false : t.archived
+        }
+      })
+    })),
+
+  reorderPinnedThreads: (orderedIds) =>
+    set((state) => ({
+      threads: state.threads.map((t) => {
+        const index = orderedIds.indexOf(t.id)
+        if (index === -1) return t
+        return { ...t, pinnedOrder: index }
+      })
+    })),
+
+  setThreadArchived: (id, archived) =>
+    set((state) => {
+      const threads = state.threads.map((t) =>
+        t.id === id
+          ? {
+              ...t,
+              archived,
+              pinned: archived ? false : t.pinned
             }
-          }
-        }),
+          : t
+      )
+      const activeThreadId =
+        archived && state.activeThreadId === id
+          ? (threads.find((t) => !t.archived)?.id ?? null)
+          : state.activeThreadId
+      return { threads, activeThreadId }
+    }),
 
-      updateTask: (threadId, taskId, updates) =>
-        set((state) => ({
-          tasksByThreadId: {
-            ...state.tasksByThreadId,
-            [threadId]: (state.tasksByThreadId[threadId] || []).map((task) =>
-              task.id === taskId ? { ...task, ...updates } : task
-            )
-          }
-        })),
+  markThreadUnread: (id, unread) =>
+    set((state) => ({
+      threads: state.threads.map((t) => (t.id === id ? { ...t, unread } : t))
+    })),
 
-      addMessage: (threadId, message) =>
-        set((state) => ({
-          threads: state.threads.map((t) =>
-            t.id === threadId ? { ...t, messages: [...t.messages, message] } : t
-          )
-        })),
+  cloneThread: (id, project, projectPath) => {
+    const source = get().threads.find((t) => t.id === id)
+    if (!source) return null
+    const clonedId = crypto.randomUUID()
+    const clonedThread: Thread = {
+      ...source,
+      id: clonedId,
+      title: `${source.title} (fork)`,
+      project: project || source.project || 'local',
+      projectPath: projectPath ?? source.projectPath,
+      createdAt: Date.now(),
+      messages: source.messages.map((message) => ({
+        ...message,
+        items: message.items.map((item) => ({ ...item }))
+      })),
+      pinned: false,
+      unread: false,
+      archived: false
+    }
 
-      updateMessage: (threadId, messageId, updates) =>
-        set((state) => ({
-          threads: state.threads.map((t) =>
-            t.id === threadId
-              ? {
-                  ...t,
-                  messages: t.messages.map((m) => (m.id === messageId ? { ...m, ...updates } : m))
-                }
-              : t
-          )
-        })),
+    set((state) => ({
+      threads: [clonedThread, ...state.threads],
+      tasksByThreadId: {
+        ...state.tasksByThreadId,
+        [clonedId]: []
+      },
+      activeThreadId: clonedId
+    }))
 
-      appendToMessage: (threadId, messageId, text) =>
-        set((state) => ({
-          threads: state.threads.map((t) =>
-            t.id === threadId
-              ? {
-                  ...t,
-                  messages: t.messages.map((m) =>
-                    m.id === messageId ? { ...m, content: m.content + text } : m
-                  )
-                }
-              : t
-          )
-        })),
+    return clonedId
+  },
 
-      addItemToMessage: (threadId, messageId, item) =>
-        set((state) => ({
-          threads: state.threads.map((t) =>
-            t.id === threadId
-              ? {
-                  ...t,
-                  messages: t.messages.map((m) =>
-                    m.id === messageId
-                      ? {
-                          ...m,
-                          items: m.items.some((i) => i.id === item.id)
-                            ? m.items.map((i) =>
-                                i.id === item.id
-                                  ? {
-                                      ...i,
-                                      ...item,
-                                      type: item.type === 'unknown' ? i.type : item.type,
-                                      content: item.content || i.content,
-                                      output: item.output || i.output,
-                                      summary: item.summary || i.summary
-                                    }
-                                  : i
-                              )
-                            : [...m.items, item]
-                        }
-                      : m
-                  )
-                }
-              : t
-          )
-        })),
+  replaceThreads: (threads) =>
+    set((state) => ({
+      threads,
+      activeThreadId:
+        state.activeThreadId && threads.some((thread) => thread.id === state.activeThreadId)
+          ? state.activeThreadId
+          : (threads[0]?.id ?? null)
+    })),
 
-      replaceMessageItems: (threadId, messageId, items) =>
-        set((state) => ({
-          threads: state.threads.map((t) =>
-            t.id === threadId
-              ? {
-                  ...t,
-                  messages: t.messages.map((m) => (m.id === messageId ? { ...m, items } : m))
-                }
-              : t
-          )
-        })),
+  replaceTasksByThread: (tasksByThreadId) => set({ tasksByThreadId }),
 
-      appendToItemContent: (threadId, messageId, itemId, itemType, text) =>
-        set((state) => ({
-          threads: state.threads.map((t) =>
-            t.id === threadId
-              ? {
-                  ...t,
-                  messages: t.messages.map((m) =>
-                    m.id === messageId
-                      ? {
-                          ...m,
-                          items: m.items.some((i) => i.id === itemId)
-                            ? m.items.map((i) =>
-                                i.id === itemId ? { ...i, content: `${i.content || ''}${text}` } : i
-                              )
-                            : [
-                                ...m.items,
-                                {
-                                  id: itemId,
-                                  type: itemType,
-                                  content: text,
-                                  completed: false
-                                }
-                              ]
-                        }
-                      : m
-                  )
-                }
-              : t
-          )
-        })),
+  setTasksForThread: (threadId, tasks) =>
+    set((state) => ({
+      tasksByThreadId: {
+        ...state.tasksByThreadId,
+        [threadId]: tasks
+      }
+    })),
 
-      updateItem: (threadId, messageId, itemId, updates) =>
-        set((state) => ({
-          threads: state.threads.map((t) =>
-            t.id === threadId
-              ? {
-                  ...t,
-                  messages: t.messages.map((m) =>
-                    m.id === messageId
-                      ? {
-                          ...m,
-                          items: m.items.map((i) => (i.id === itemId ? { ...i, ...updates } : i))
-                        }
-                      : m
-                  )
-                }
-              : t
-          )
-        })),
+  upsertTask: (threadId, task) =>
+    set((state) => {
+      const existingTasks = state.tasksByThreadId[threadId] || []
+      const alreadyExists = existingTasks.some((entry) => entry.id === task.id)
+      return {
+        tasksByThreadId: {
+          ...state.tasksByThreadId,
+          [threadId]: alreadyExists
+            ? existingTasks.map((entry) => (entry.id === task.id ? { ...entry, ...task } : entry))
+            : [...existingTasks, task]
+        }
+      }
+    }),
 
-      completeMessageItems: (threadId, messageId, updates = {}) =>
-        set((state) => ({
-          threads: state.threads.map((t) =>
-            t.id === threadId
-              ? {
-                  ...t,
-                  messages: t.messages.map((m) =>
-                    m.id === messageId
-                      ? {
-                          ...m,
-                          items: m.items.map((i) =>
-                            i.completed ? i : { ...i, ...updates, completed: true }
-                          )
-                        }
-                      : m
-                  )
-                }
-              : t
-          )
-        })),
+  updateTask: (threadId, taskId, updates) =>
+    set((state) => ({
+      tasksByThreadId: {
+        ...state.tasksByThreadId,
+        [threadId]: (state.tasksByThreadId[threadId] || []).map((task) =>
+          task.id === taskId ? { ...task, ...updates } : task
+        )
+      }
+    })),
 
-      appendToItemOutput: (threadId, messageId, itemId, text) =>
-        set((state) => ({
-          threads: state.threads.map((t) =>
-            t.id === threadId
-              ? {
-                  ...t,
-                  messages: t.messages.map((m) =>
-                    m.id === messageId
-                      ? {
-                          ...m,
-                          items: m.items.map((i) =>
-                            i.id === itemId
+  addMessage: (threadId, message) =>
+    set((state) => ({
+      threads: state.threads.map((t) =>
+        t.id === threadId ? { ...t, messages: [...t.messages, message] } : t
+      )
+    })),
+
+  updateMessage: (threadId, messageId, updates) =>
+    set((state) => ({
+      threads: state.threads.map((t) =>
+        t.id === threadId
+          ? {
+              ...t,
+              messages: t.messages.map((m) => (m.id === messageId ? { ...m, ...updates } : m))
+            }
+          : t
+      )
+    })),
+
+  appendToMessage: (threadId, messageId, text) =>
+    set((state) => ({
+      threads: state.threads.map((t) =>
+        t.id === threadId
+          ? {
+              ...t,
+              messages: t.messages.map((m) =>
+                m.id === messageId ? { ...m, content: m.content + text } : m
+              )
+            }
+          : t
+      )
+    })),
+
+  addItemToMessage: (threadId, messageId, item) =>
+    set((state) => ({
+      threads: state.threads.map((t) =>
+        t.id === threadId
+          ? {
+              ...t,
+              messages: t.messages.map((m) =>
+                m.id === messageId
+                  ? {
+                      ...m,
+                      items: m.items.some((i) => i.id === item.id)
+                        ? m.items.map((i) =>
+                            i.id === item.id
                               ? {
                                   ...i,
-                                  output: mergeStreamOutput(i.output || '', text)
+                                  ...item,
+                                  type: item.type === 'unknown' ? i.type : item.type,
+                                  content: item.content || i.content,
+                                  output: item.output || i.output,
+                                  summary: item.summary || i.summary
                                 }
                               : i
                           )
-                        }
-                      : m
-                  )
-                }
-              : t
-          )
-        })),
+                        : [...m.items, item]
+                    }
+                  : m
+              )
+            }
+          : t
+      )
+    })),
 
-      setModel: (model) =>
-        set((state) => ({
-          model,
-          reasoningEffort: getCompatibleReasoningEffort(
-            state.availableModels.find((entry) => entry.id === model),
-            state.reasoningEffort
-          )
-        })),
-      setReasoningEffort: (reasoningEffort) =>
-        set((state) => ({
-          reasoningEffort: getCompatibleReasoningEffort(
-            state.availableModels.find((entry) => entry.id === state.model),
-            reasoningEffort
-          )
-        })),
-      setAutonomyLevel: (autonomyLevel) => set({ autonomyLevel }),
-      setIsStreaming: (isStreaming) => set({ isStreaming }),
-      setStreamingThread: (streamingThreadId) => set({ streamingThreadId }),
-      setIsSidebarOpen: (isSidebarOpen) => set({ isSidebarOpen }),
-      setAuthenticated: (isAuthenticated) => set({ isAuthenticated }),
-      setServerReady: (serverReady) => set({ serverReady }),
-      setAvailableModels: (availableModels) =>
-        set((state) => ({
-          availableModels,
-          reasoningEffort: getCompatibleReasoningEffort(
-            availableModels.find((entry) => entry.id === state.model),
-            state.reasoningEffort
-          )
-        })),
-      setApprovalRequest: (approvalRequest) => set({ approvalRequest }),
-      setActiveTurn: (threadId, turnId, mode) =>
-        set((state) => ({
-          activeTurnThreadId: threadId,
-          activeTurnId: turnId,
-          activeTurnMode: mode ?? state.activeTurnMode,
-          activeTurnPlan: mode === undefined ? state.activeTurnPlan : null
-        })),
-      setActiveTurnPlan: (activeTurnPlan) => set({ activeTurnPlan }),
-      clearActiveTurn: () =>
-        set({
-          activeTurnThreadId: null,
-          activeTurnId: null,
-          activeTurnMode: null,
-          activeTurnPlan: null
-        }),
-      setPlanModeEnabled: (planModeEnabled) => set({ planModeEnabled }),
-      setPlanSheetOpen: (isPlanSheetOpen) => set({ isPlanSheetOpen }),
-      setSelectedPlanPath: (selectedPlanPath) => set({ selectedPlanPath }),
-      setThemes: (themes) => set({ themes }),
-      updateSettings: (updates) =>
-        set((state) => ({
-          settings: { ...state.settings, ...updates }
-        })),
-      hydrateFromPersistedState: (persistedState) =>
-        set((state) => mergePersistedCodexStoreState(persistedState, state))
+  replaceMessageItems: (threadId, messageId, items) =>
+    set((state) => ({
+      threads: state.threads.map((t) =>
+        t.id === threadId
+          ? {
+              ...t,
+              messages: t.messages.map((m) => (m.id === messageId ? { ...m, items } : m))
+            }
+          : t
+      )
+    })),
+
+  appendToItemContent: (threadId, messageId, itemId, itemType, text) =>
+    set((state) => ({
+      threads: state.threads.map((t) =>
+        t.id === threadId
+          ? {
+              ...t,
+              messages: t.messages.map((m) =>
+                m.id === messageId
+                  ? {
+                      ...m,
+                      items: m.items.some((i) => i.id === itemId)
+                        ? m.items.map((i) =>
+                            i.id === itemId ? { ...i, content: `${i.content || ''}${text}` } : i
+                          )
+                        : [
+                            ...m.items,
+                            {
+                              id: itemId,
+                              type: itemType,
+                              content: text,
+                              completed: false
+                            }
+                          ]
+                    }
+                  : m
+              )
+            }
+          : t
+      )
+    })),
+
+  updateItem: (threadId, messageId, itemId, updates) =>
+    set((state) => ({
+      threads: state.threads.map((t) =>
+        t.id === threadId
+          ? {
+              ...t,
+              messages: t.messages.map((m) =>
+                m.id === messageId
+                  ? {
+                      ...m,
+                      items: m.items.map((i) => (i.id === itemId ? { ...i, ...updates } : i))
+                    }
+                  : m
+              )
+            }
+          : t
+      )
+    })),
+
+  completeMessageItems: (threadId, messageId, updates = {}) =>
+    set((state) => ({
+      threads: state.threads.map((t) =>
+        t.id === threadId
+          ? {
+              ...t,
+              messages: t.messages.map((m) =>
+                m.id === messageId
+                  ? {
+                      ...m,
+                      items: m.items.map((i) =>
+                        i.completed ? i : { ...i, ...updates, completed: true }
+                      )
+                    }
+                  : m
+              )
+            }
+          : t
+      )
+    })),
+
+  appendToItemOutput: (threadId, messageId, itemId, text) =>
+    set((state) => ({
+      threads: state.threads.map((t) =>
+        t.id === threadId
+          ? {
+              ...t,
+              messages: t.messages.map((m) =>
+                m.id === messageId
+                  ? {
+                      ...m,
+                      items: m.items.map((i) =>
+                        i.id === itemId
+                          ? {
+                              ...i,
+                              output: mergeStreamOutput(i.output || '', text)
+                            }
+                          : i
+                      )
+                    }
+                  : m
+              )
+            }
+          : t
+      )
+    })),
+
+  setModel: (model) =>
+    set((state) => ({
+      model,
+      reasoningEffort: getCompatibleReasoningEffort(
+        state.availableModels.find((entry) => entry.id === model),
+        state.reasoningEffort
+      )
+    })),
+  setReasoningEffort: (reasoningEffort) =>
+    set((state) => ({
+      reasoningEffort: getCompatibleReasoningEffort(
+        state.availableModels.find((entry) => entry.id === state.model),
+        reasoningEffort
+      )
+    })),
+  setAutonomyLevel: (autonomyLevel) => set({ autonomyLevel }),
+  setIsStreaming: (isStreaming) => set({ isStreaming }),
+  setStreamingThread: (streamingThreadId) => set({ streamingThreadId }),
+  setIsSidebarOpen: (isSidebarOpen) => set({ isSidebarOpen }),
+  setAuthenticated: (isAuthenticated) => set({ isAuthenticated }),
+  setServerReady: (serverReady) => set({ serverReady }),
+  setAvailableModels: (availableModels) =>
+    set((state) => ({
+      availableModels,
+      reasoningEffort: getCompatibleReasoningEffort(
+        availableModels.find((entry) => entry.id === state.model),
+        state.reasoningEffort
+      )
+    })),
+  setApprovalRequest: (approvalRequest) => set({ approvalRequest }),
+  setActiveTurn: (threadId, turnId, mode) =>
+    set((state) => ({
+      activeTurnThreadId: threadId,
+      activeTurnId: turnId,
+      activeTurnMode: mode ?? state.activeTurnMode,
+      activeTurnPlan: mode === undefined ? state.activeTurnPlan : null
+    })),
+  setActiveTurnPlan: (activeTurnPlan) => set({ activeTurnPlan }),
+  clearActiveTurn: () =>
+    set({
+      activeTurnThreadId: null,
+      activeTurnId: null,
+      activeTurnMode: null,
+      activeTurnPlan: null
     }),
-    {
-      name: 'codex-store',
-      merge: (persistedState, currentState) =>
-        mergePersistedCodexStoreState(
-          persistedState as Partial<PersistedCodexStoreState>,
-          currentState
-        ),
-      partialize: (state) => buildPersistedCodexStoreState(state)
-    }
-  )
-)
+  setPlanModeEnabled: (planModeEnabled) => set({ planModeEnabled }),
+  setPlanSheetOpen: (isPlanSheetOpen) => set({ isPlanSheetOpen }),
+  setSelectedPlanPath: (selectedPlanPath) => set({ selectedPlanPath }),
+  setThemes: (themes) => set({ themes }),
+  updateSettings: (updates) =>
+    set((state) => ({
+      settings: { ...state.settings, ...updates }
+    })),
+  hydrateFromPersistedState: (persistedState) =>
+    set((state) => mergePersistedCodexStoreState(persistedState, state))
+}))

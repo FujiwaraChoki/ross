@@ -179,7 +179,7 @@ export default function SkillsTab(): ReactElement {
   }, [])
 
   return (
-    <div className="flex-1 overflow-y-auto scrollbar-hide">
+    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain scrollbar-hide">
       <div className="max-w-5xl mx-auto px-8 py-8">
         {/* Header */}
         <div className="flex items-start justify-between gap-4 mb-1">

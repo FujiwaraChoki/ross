@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type ReactElement } from 'react'
+import { memo, useState, useEffect, useCallback, useMemo, type ReactElement } from 'react'
 import { Check, ChevronDown, Copy } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { ANIMATION_EASE } from '@/lib/animations'
@@ -274,7 +274,9 @@ function TaskStatusItem({ item }: { item: MessageItem }): ReactElement {
     <div className="my-3 rounded-2xl border border-border/60 bg-secondary/35 px-4 py-3">
       <div className="flex items-center gap-2">
         <span className="text-ui-10 uppercase tracking-[0.18em] text-muted-foreground">Task</span>
-        <span className={`rounded-full bg-background/80 px-2 py-0.5 text-ui-10 uppercase tracking-[0.14em] text-muted-foreground ${item.status === 'running' ? 'text-shimmer' : ''}`}>
+        <span
+          className={`rounded-full bg-background/80 px-2 py-0.5 text-ui-10 uppercase tracking-[0.14em] text-muted-foreground ${item.status === 'running' ? 'text-shimmer' : ''}`}
+        >
           {formatTaskStatusLabel(item.status)}
         </span>
       </div>
@@ -747,7 +749,11 @@ function ToolCallGroup({ items }: { items: MessageItem[] }): ReactElement {
         >
           <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
         </motion.div>
-        <span className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground ${!allCompleted ? 'text-shimmer' : ''}`}>{groupLabel}</span>
+        <span
+          className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground ${!allCompleted ? 'text-shimmer' : ''}`}
+        >
+          {groupLabel}
+        </span>
         <span
           className={`${UI_TEXT_SIZE_CLASS} text-foreground/60 transition-colors group-hover/exploration:text-foreground`}
         >
@@ -893,15 +899,26 @@ interface MessageProps {
   message: MessageType
 }
 
-export default function Message({ message }: MessageProps): ReactElement {
+function Message({ message }: MessageProps): ReactElement {
   const threadDetail = useCodexStore((state) => state.settings.threadDetail)
   const isUser = message.role === 'user'
   const attachments = message.attachments || []
-  const itemAgentText = message.items
-    .filter((item) => item.type === 'agentMessage')
-    .map((item) => item.content)
-    .join('')
+  const itemAgentText = useMemo(
+    () =>
+      message.items
+        .filter((item) => item.type === 'agentMessage')
+        .map((item) => item.content)
+        .join(''),
+    [message.items]
+  )
   const assistantText = itemAgentText || message.content
+  const groupedSegments = useMemo(
+    () =>
+      message.items.length > 0 && threadDetail === 'steps_with_code_commands'
+        ? groupItems(message.items)
+        : [],
+    [message.items, threadDetail]
+  )
 
   return (
     <motion.div
@@ -944,8 +961,8 @@ export default function Message({ message }: MessageProps): ReactElement {
         </div>
       ) : (
         <div className="group/assistant space-y-1">
-          {message.items.length > 0 && threadDetail === 'steps_with_code_commands' ? (
-            groupItems(message.items).map((segment) =>
+          {groupedSegments.length > 0 ? (
+            groupedSegments.map((segment) =>
               segment.kind === 'group' ? (
                 <ToolCallGroup key={segment.items[0].id} items={segment.items} />
               ) : (
@@ -964,5 +981,7 @@ export default function Message({ message }: MessageProps): ReactElement {
     </motion.div>
   )
 }
+
+export default memo(Message)
 
 export { WorkDivider, TerminalOutput, InlineCode }

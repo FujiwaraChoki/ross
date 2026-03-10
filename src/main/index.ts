@@ -453,6 +453,11 @@ async function saveStoredPlanDocument(params: SavePlanDocumentParams): Promise<S
   const filePath = join(directory, filename)
 
   await writeFile(filePath, `${content}\n`, 'utf8')
+  console.log('[plan][storage] Saved plan document', {
+    title,
+    filePath,
+    bytes: Buffer.byteLength(`${content}\n`, 'utf8')
+  })
   return readStoredPlanDocument(filePath)
 }
 

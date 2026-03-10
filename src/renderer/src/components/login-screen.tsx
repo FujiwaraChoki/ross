@@ -23,7 +23,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps): ReactElement
   }
 
   return (
-    <div className="flex items-center justify-center h-screen bg-background drag-region">
+    <div className="flex h-full items-center justify-center bg-background drag-region">
       <motion.div
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}

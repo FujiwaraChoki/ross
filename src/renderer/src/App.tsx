@@ -295,6 +295,15 @@ function buildPlanDocument(params: {
   }
 }
 
+function logPlanLifecycle(message: string, details?: Record<string, unknown>): void {
+  if (details) {
+    console.log('[plan][ui]', message, details)
+    return
+  }
+
+  console.log('[plan][ui]', message)
+}
+
 function getErrorMessageFromParams(params: EventPayload): string | null {
   const error = asObject(params.error)
   const message = extractText(error?.message) || extractText(params.message)
@@ -990,10 +999,29 @@ export default function App(): ReactElement {
       turnPlan: TurnPlanSnapshot | null
     }): Promise<void> => {
       const planDocument = buildPlanDocument(params)
-      if (!planDocument) return
+      if (!planDocument) {
+        logPlanLifecycle('Skipped plan persistence because no plan document could be built', {
+          threadId: params.thread.id,
+          assistantTextLength: getAssistantMarkdown(params.assistantMessage).length,
+          planTextLength: getPlanMarkdown(params.assistantMessage).length,
+          outlineSteps: params.turnPlan?.plan.length || 0
+        })
+        return
+      }
+
+      logPlanLifecycle('Persisting plan document', {
+        threadId: params.thread.id,
+        title: planDocument.title,
+        characters: planDocument.content.length
+      })
 
       try {
         const savedPlan = await window.codex.savePlan(planDocument)
+        logPlanLifecycle('Plan document persisted', {
+          threadId: params.thread.id,
+          path: savedPlan.path,
+          bytes: savedPlan.size
+        })
         setSelectedPlanPath(savedPlan.path)
         setPlanSheetOpen(true)
       } catch (error) {
@@ -1136,6 +1164,14 @@ export default function App(): ReactElement {
   useEffect(() => {
     if (!appStateReady) return
 
+    if (isStreaming) {
+      if (appStateSaveTimeoutRef.current) {
+        clearTimeout(appStateSaveTimeoutRef.current)
+        appStateSaveTimeoutRef.current = null
+      }
+      return
+    }
+
     const snapshot = buildPersistedCodexStoreState(useCodexStore.getState())
     const serializedSnapshot = JSON.stringify(snapshot)
     if (lastPersistedAppStateRef.current === serializedSnapshot) return
@@ -1152,7 +1188,7 @@ export default function App(): ReactElement {
           lastPersistedAppStateRef.current = serializedSnapshot
         })
         .catch((error) => console.error('Failed to persist app state:', error))
-    }, 150)
+    }, 500)
 
     return () => {
       if (appStateSaveTimeoutRef.current) {
@@ -1172,6 +1208,7 @@ export default function App(): ReactElement {
     reasoningEffort,
     recentProjects,
     settings,
+    isStreaming,
     tasksByThreadId,
     threads
   ])
@@ -1289,6 +1326,14 @@ export default function App(): ReactElement {
               collaborationModeKind || activeTurnMode || 'default'
             )
           }
+          if (collaborationModeKind === 'plan' || activeTurnMode === 'plan') {
+            logPlanLifecycle('Received turn/started for plan-mode turn', {
+              threadId: nextThreadId,
+              turnId,
+              collaborationModeKind,
+              activeTurnMode
+            })
+          }
           setIsStreaming(true)
           break
         }
@@ -1297,7 +1342,13 @@ export default function App(): ReactElement {
         case 'turn.plan.updated': {
           const turnId = getTurnIdFromParams(p)
           if (activeTurnId && turnId && activeTurnId !== turnId) break
-          setActiveTurnPlan(normalizeTurnPlanSnapshot(p))
+          const snapshot = normalizeTurnPlanSnapshot(p)
+          logPlanLifecycle('Received turn/plan update', {
+            turnId,
+            explanationLength: snapshot?.explanation?.length || 0,
+            steps: snapshot?.plan.length || 0
+          })
+          setActiveTurnPlan(snapshot)
           break
         }
 
@@ -1663,6 +1714,28 @@ export default function App(): ReactElement {
             thread != null &&
             assistantMessage != null &&
             getTurnStatusFromParams(p) !== 'failed'
+          const assistantMarkdownLength = getAssistantMarkdown(assistantMessage || undefined).length
+          const planMarkdownLength = getPlanMarkdown(assistantMessage || undefined).length
+          const outlineSteps = activeTurnPlan?.plan.length || 0
+
+          if (
+            activeTurnMode === 'plan' ||
+            shouldPersistPlan ||
+            planMarkdownLength > 0 ||
+            outlineSteps > 0
+          ) {
+            logPlanLifecycle('Handling turn/completed for plan flow', {
+              threadId,
+              turnId,
+              status: getTurnStatusFromParams(p),
+              activeTurnMode,
+              shouldPersistPlan,
+              assistantMarkdownLength,
+              planMarkdownLength,
+              outlineSteps,
+              hasAssistantMessage: assistantMessage != null
+            })
+          }
 
           if (currentAssistantId && threadId) {
             const turnStatus = getTurnStatusFromParams(p)
@@ -1700,6 +1773,23 @@ export default function App(): ReactElement {
               thread,
               assistantMessage,
               turnPlan: activeTurnPlan
+            })
+          } else if (activeTurnMode === 'plan') {
+            logPlanLifecycle('Skipped plan persistence after turn/completed', {
+              threadId,
+              turnId,
+              status: getTurnStatusFromParams(p),
+              reason:
+                getTurnStatusFromParams(p) === 'failed'
+                  ? 'turn failed'
+                  : !thread
+                    ? 'thread missing'
+                    : !assistantMessage
+                      ? 'assistant message missing'
+                      : 'shouldPersistPlan was false',
+              assistantMarkdownLength,
+              planMarkdownLength,
+              outlineSteps
             })
           }
           break
@@ -1847,15 +1937,15 @@ export default function App(): ReactElement {
   const isSettingsTab = activeTab === 'settings'
 
   return (
-    <div className="relative h-screen overflow-hidden">
+    <div className="relative h-full overflow-hidden">
       <div className="absolute inset-x-0 top-0 z-50 h-5 drag-region select-none" />
 
       {isSettingsTab ? (
         <SettingsTab />
       ) : (
-        <div className="flex h-screen">
+        <div className="flex h-full min-h-0">
           <AppSidebar />
-          <div className="flex-1 flex flex-col min-w-0 bg-background">
+          <div className="flex min-h-0 flex-1 flex-col min-w-0 overflow-hidden bg-background">
             <Header />
             {activeTab === 'skills' ? <SkillsTab /> : <Chat />}
           </div>

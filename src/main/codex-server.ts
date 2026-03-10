@@ -26,6 +26,15 @@ interface TurnStartResultShape {
   collaboration_mode_kind?: unknown
 }
 
+function logPlanServer(message: string, details?: Record<string, unknown>): void {
+  if (details) {
+    console.log('[plan][server]', message, details)
+    return
+  }
+
+  console.log('[plan][server]', message)
+}
+
 export class CodexServer {
   private proc: ChildProcess | null = null
   private rl: readline.Interface | null = null
@@ -81,6 +90,13 @@ export class CodexServer {
         experimentalApi: true
       }
     })
+      .then((result) => {
+        logPlanServer('Initialized app-server connection', {
+          experimentalApi: true,
+          result: typeof result === 'object' && result !== null ? result : null
+        })
+        return result
+      })
       .then(() => this.notify('initialized', {}))
       .then(() => undefined)
 
@@ -271,8 +287,25 @@ export class CodexServer {
   private async requestTurnStartWithCompatibility(
     params: Record<string, unknown>
   ): Promise<unknown> {
+    const requestedMode =
+      typeof params.collaborationMode === 'object' &&
+      params.collaborationMode !== null &&
+      typeof (params.collaborationMode as { mode?: unknown }).mode === 'string'
+        ? (params.collaborationMode as { mode: string }).mode
+        : null
+
     try {
-      return await this.request('turn/start', params)
+      const result = await this.request('turn/start', params)
+      if (requestedMode) {
+        logPlanServer('turn/start accepted collaboration mode', {
+          requestedMode,
+          turnId:
+            typeof result === 'object' && result !== null
+              ? ((result as { turn?: { id?: unknown } }).turn?.id ?? null)
+              : null
+        })
+      }
+      return result
     } catch (error) {
       if (
         !('collaborationMode' in params) ||
@@ -283,6 +316,10 @@ export class CodexServer {
 
       const fallbackParams = { ...params }
       delete fallbackParams.collaborationMode
+      logPlanServer('turn/start rejected collaboration mode, retrying without it', {
+        requestedMode,
+        error: error instanceof Error ? error.message : String(error)
+      })
       const result = await this.request('turn/start', fallbackParams)
       return this.withTurnStartModeFallback(result, 'default')
     }

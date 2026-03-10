@@ -1,11 +1,4 @@
-import {
-  useMemo,
-  useState,
-  useEffect,
-  useRef,
-  type ReactElement,
-  type ReactNode
-} from 'react'
+import { useMemo, useState, useEffect, useRef, type ReactElement, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Pin, Trash2, Folder, ChevronDown, SquarePen, LayoutGrid } from 'lucide-react'
 import { toast } from 'sonner'
@@ -17,11 +10,7 @@ import {
   useSensors,
   type DragEndEvent
 } from '@dnd-kit/core'
-import {
-  SortableContext,
-  useSortable,
-  verticalListSortingStrategy
-} from '@dnd-kit/sortable'
+import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { ANIMATION_EASE } from '@/lib/animations'
 import { useCodexStore, timeAgo, type Thread } from '@/lib/store'
@@ -58,10 +47,7 @@ function ProjectRowIcon({
             transition={{ duration: 0.12, ease: [0.25, 0.1, 0.25, 1] }}
             className="absolute inset-0"
           >
-            <ChevronDown
-              className="w-3.5 h-3.5 text-sidebar-muted"
-              strokeWidth={1.75}
-            />
+            <ChevronDown className="w-3.5 h-3.5 text-sidebar-muted" strokeWidth={1.75} />
           </motion.div>
         ) : (
           <motion.div
@@ -77,10 +63,7 @@ function ProjectRowIcon({
                 <img src={iconDataUrl} alt="" className="h-full w-full object-cover" />
               </span>
             ) : (
-              <Folder
-                className="w-3.5 h-3.5 text-sidebar-muted"
-                strokeWidth={1.75}
-              />
+              <Folder className="w-3.5 h-3.5 text-sidebar-muted" strokeWidth={1.75} />
             )}
           </motion.div>
         )}
@@ -332,9 +315,7 @@ export default function AppSidebar(): ReactElement {
     }
   }, [threads])
 
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
-  )
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
   const handleDragEnd = (event: DragEndEvent): void => {
     const { active, over } = event
@@ -527,7 +508,7 @@ export default function AppSidebar(): ReactElement {
             transition={isResizing ? { duration: 0 } : { duration: 0.2, ease: ANIMATION_EASE }}
             className="sidebar-resize-shell h-full"
           >
-            <aside className="sidebar-glass h-full border-r border-border flex w-full flex-col overflow-hidden select-none">
+            <aside className="sidebar-glass flex h-full min-h-0 w-full flex-col overflow-hidden border-r border-border select-none">
               {/* Top nav items */}
               <div className="pt-11 px-3 pb-1 drag-region space-y-0.5">
                 <button
@@ -559,7 +540,7 @@ export default function AppSidebar(): ReactElement {
               </div>
 
               {/* Thread list grouped by project */}
-              <div className="flex-1 overflow-y-auto scrollbar-hide px-2 pb-2">
+              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain scrollbar-hide px-2 pb-2">
                 {pinnedThreads.length > 0 && (
                   <div className="mb-1.5">
                     <div className="flex items-center gap-2 px-2.5 pt-1 pb-1 mb-1">
@@ -569,8 +550,15 @@ export default function AppSidebar(): ReactElement {
                         {pinnedThreads.length}
                       </span>
                     </div>
-                    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-                      <SortableContext items={pinnedThreads.map((t) => t.id)} strategy={verticalListSortingStrategy}>
+                    <DndContext
+                      sensors={sensors}
+                      collisionDetection={closestCenter}
+                      onDragEnd={handleDragEnd}
+                    >
+                      <SortableContext
+                        items={pinnedThreads.map((t) => t.id)}
+                        strategy={verticalListSortingStrategy}
+                      >
                         {pinnedThreads.map((t) => (
                           <SortablePinnedThreadRow key={t.id} id={t.id}>
                             {renderThreadRow(t)}

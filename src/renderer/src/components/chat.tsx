@@ -1,4 +1,5 @@
 import {
+  memo,
   useState,
   useRef,
   useEffect,
@@ -10,6 +11,7 @@ import {
 } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { FileCode2, FileImage, FileText, ListChecks, X } from 'lucide-react'
+import { useShallow } from 'zustand/react/shallow'
 import { ANIMATION_EASE } from '@/lib/animations'
 import {
   useCodexStore,
@@ -344,6 +346,15 @@ function getEffectiveFollowUpBehavior(
   return behavior === 'queue' ? 'steer' : 'queue'
 }
 
+function logPlanComposer(message: string, details?: Record<string, unknown>): void {
+  if (details) {
+    console.log('[plan][composer]', message, details)
+    return
+  }
+
+  console.log('[plan][composer]', message)
+}
+
 function createAttachmentRecord(
   attachment: Pick<ComposerAttachment, 'name' | 'path' | 'kind' | 'previewUrl'>
 ): ComposerAttachment {
@@ -356,11 +367,10 @@ function createAttachmentRecord(
   }
 }
 
-export default function Chat(): ReactElement {
+function Chat(): ReactElement {
   const [input, setInput] = useState('')
   const [pendingAttachments, setPendingAttachments] = useState<ComposerAttachment[]>([])
   const [isDragOverComposer, setIsDragOverComposer] = useState(false)
-  const storeModels = useCodexStore((s) => s.availableModels)
   const [isRecording, setIsRecording] = useState(false)
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [recordingTime, setRecordingTime] = useState(0)
@@ -393,11 +403,11 @@ export default function Chat(): ReactElement {
   const audioChunksRef = useRef<Blob[]>([])
 
   const {
-    threads,
     activeThreadId,
     activeTurnId,
     activeTurnThreadId,
     isStreaming,
+    streamingThreadId,
     model,
     setModel,
     reasoningEffort,
@@ -409,8 +419,36 @@ export default function Chat(): ReactElement {
     activeProject,
     recentProjects,
     setActiveProject,
-    settings
-  } = useCodexStore()
+    settings,
+    storeModels
+  } = useCodexStore(
+    useShallow((state) => ({
+      activeThreadId: state.activeThreadId,
+      activeTurnId: state.activeTurnId,
+      activeTurnThreadId: state.activeTurnThreadId,
+      isStreaming: state.isStreaming,
+      streamingThreadId: state.streamingThreadId,
+      model: state.model,
+      setModel: state.setModel,
+      reasoningEffort: state.reasoningEffort,
+      setReasoningEffort: state.setReasoningEffort,
+      autonomyLevel: state.autonomyLevel,
+      setAutonomyLevel: state.setAutonomyLevel,
+      planModeEnabled: state.planModeEnabled,
+      setPlanModeEnabled: state.setPlanModeEnabled,
+      activeProject: state.activeProject,
+      recentProjects: state.recentProjects,
+      setActiveProject: state.setActiveProject,
+      settings: state.settings,
+      storeModels: state.availableModels
+    }))
+  )
+  const activeThread = useCodexStore(
+    useCallback((state) => {
+      const threadId = state.activeThreadId
+      return threadId ? state.threads.find((thread) => thread.id === threadId) || null : null
+    }, [])
+  )
 
   const models: ModelOption[] =
     storeModels.length > 0
@@ -426,7 +464,6 @@ export default function Chat(): ReactElement {
     ? selectedModel.supportedReasoningEfforts
     : FALLBACK_REASONING_EFFORTS
 
-  const activeThread = threads.find((t) => t.id === activeThreadId)
   const matchingProject =
     activeThread?.project && !activeThread.projectPath
       ? recentProjects.find((project) => project.name === activeThread.project)
@@ -439,14 +476,20 @@ export default function Chat(): ReactElement {
     activeProject?.name ||
     (currentProjectPath ? getPathLeaf(currentProjectPath) : null)
   const messages = activeThread?.messages ?? EMPTY_MESSAGES
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null
   const activeThreadIsStreaming =
-    activeThread?.messages.some((message) => message.isStreaming) ?? false
+    activeThreadId != null && streamingThreadId != null && streamingThreadId === activeThreadId
   const activeThreadCanInterrupt =
     activeThreadIsStreaming && Boolean(activeTurnId) && activeTurnThreadId === activeThreadId
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    if (!lastMessage) return
+
+    messagesEndRef.current?.scrollIntoView({
+      behavior: activeThreadIsStreaming ? 'auto' : 'smooth',
+      block: 'end'
+    })
+  }, [activeThreadId, activeThreadIsStreaming, lastMessage, messages.length])
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -729,6 +772,14 @@ export default function Chat(): ReactElement {
       store.setStreamingThread(threadId)
       store.setIsStreaming(true)
       store.setActiveTurn(threadId, null, planModeEnabled ? 'plan' : 'default')
+      if (planModeEnabled) {
+        logPlanComposer('Starting plan-mode turn', {
+          threadId,
+          model: store.model,
+          reasoningEffort: store.reasoningEffort,
+          inputItems: inputItems.length
+        })
+      }
 
       try {
         const result = await window.codex.turnStart({
@@ -756,6 +807,14 @@ export default function Chat(): ReactElement {
             turnId,
             getTurnModeKindFromTurnStartResult(result) || (planModeEnabled ? 'plan' : 'default')
           )
+        }
+        if (planModeEnabled) {
+          logPlanComposer('Plan-mode turn started', {
+            threadId,
+            turnId,
+            collaborationMode:
+              getTurnModeKindFromTurnStartResult(result) || (planModeEnabled ? 'plan' : 'default')
+          })
         }
       } catch (e) {
         console.error('Failed to start turn:', e)
@@ -1800,8 +1859,8 @@ export default function Chat(): ReactElement {
   }
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="flex-1 overflow-y-auto scrollbar-hide">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="flex-1 overflow-y-auto overscroll-contain scrollbar-hide">
         <div className="max-w-2xl mx-auto px-6 py-5 space-y-4">
           {messages.map((msg) => (
             <Message key={msg.id} message={msg} />
@@ -1814,3 +1873,5 @@ export default function Chat(): ReactElement {
     </div>
   )
 }
+
+export default memo(Chat)

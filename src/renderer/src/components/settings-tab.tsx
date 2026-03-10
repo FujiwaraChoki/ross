@@ -1491,9 +1491,7 @@ export default function SettingsTab(): ReactElement {
   const isSearching = themeSearch.trim().length > 0
   const hasHiddenThemes = !isSearching && filteredThemes.length > VISIBLE_THEME_COUNT
   const visibleThemes =
-    isSearching || showAllThemes
-      ? filteredThemes
-      : filteredThemes.slice(0, VISIBLE_THEME_COUNT)
+    isSearching || showAllThemes ? filteredThemes : filteredThemes.slice(0, VISIBLE_THEME_COUNT)
   const hiddenCount = filteredThemes.length - VISIBLE_THEME_COUNT
 
   const handleImportTheme = useCallback(async (): Promise<void> => {
@@ -1541,8 +1539,8 @@ export default function SettingsTab(): ReactElement {
   )
 
   return (
-    <div className="h-screen text-foreground">
-      <div className="flex h-full overflow-hidden">
+    <div className="h-full min-h-0 text-foreground">
+      <div className="flex h-full min-h-0 overflow-hidden">
         <div
           ref={containerRef}
           className="sidebar-resize-shell h-full"
@@ -1586,7 +1584,7 @@ export default function SettingsTab(): ReactElement {
           />
         </div>
 
-        <main className="flex-1 overflow-y-auto bg-background">
+        <main className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-background">
           {activePage === 'Configuration' && <ConfigurationPage />}
           {activePage === 'MCP servers' && <McpServersPage />}
           {activePage === 'Personalization' && <PersonalizationPage />}
@@ -1761,7 +1759,10 @@ export default function SettingsTab(): ReactElement {
                   </div>
 
                   <div className="relative mt-3">
-                    <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" strokeWidth={1.9} />
+                    <Search
+                      className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
+                      strokeWidth={1.9}
+                    />
                     <input
                       type="text"
                       value={themeSearch}
