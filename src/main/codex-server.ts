@@ -76,7 +76,10 @@ export class CodexServer {
 
     // Initialize the connection
     this.initPromise = this.request('initialize', {
-      clientInfo: { name: 'ross-desktop', title: 'Ross', version: '1.0.1' }
+      clientInfo: { name: 'ross-desktop', title: 'Ross', version: '1.0.1' },
+      capabilities: {
+        experimentalApi: true
+      }
     })
       .then(() => this.notify('initialized', {}))
       .then(() => undefined)
@@ -278,7 +281,8 @@ export class CodexServer {
         throw error
       }
 
-      const { collaborationMode: _collaborationMode, ...fallbackParams } = params
+      const fallbackParams = { ...params }
+      delete fallbackParams.collaborationMode
       const result = await this.request('turn/start', fallbackParams)
       return this.withTurnStartModeFallback(result, 'default')
     }

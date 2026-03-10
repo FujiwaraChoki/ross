@@ -265,6 +265,39 @@
   }
 }
 
+@keyframes text-shimmer {
+  0% {
+    background-position: 200% 50%;
+  }
+  100% {
+    background-position: -20% 50%;
+  }
+}
+
+.text-shimmer {
+  color: transparent;
+  background-image: linear-gradient(
+    110deg,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 38%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 62%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: text-shimmer 1.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .text-shimmer {
+    animation: none;
+    color: var(--muted-foreground);
+    background-image: none;
+  }
+}
+
 @theme inline {
   --font-sans: var(--app-sans-font-family, system-ui, -apple-system, sans-serif);
   --font-mono: var(--app-code-font-family, 'SF Mono', 'Menlo', 'Monaco', ui-monospace, monospace);

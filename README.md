@@ -25,6 +25,10 @@
 
 ---
 
+> **Note:** Ross is heavily inspired by (and essentially a personal clone of) the [Codex App](https://github.com/openai/codex/tree/main/codex-app) by OpenAI, rebuilt for my own purposes.
+
+---
+
 ## Highlights
 
 - **Streaming chat UI** — real-time token streaming for Codex turns

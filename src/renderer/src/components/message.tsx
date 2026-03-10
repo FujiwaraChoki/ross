@@ -274,7 +274,7 @@ function TaskStatusItem({ item }: { item: MessageItem }): ReactElement {
     <div className="my-3 rounded-2xl border border-border/60 bg-secondary/35 px-4 py-3">
       <div className="flex items-center gap-2">
         <span className="text-ui-10 uppercase tracking-[0.18em] text-muted-foreground">Task</span>
-        <span className="rounded-full bg-background/80 px-2 py-0.5 text-ui-10 uppercase tracking-[0.14em] text-muted-foreground">
+        <span className={`rounded-full bg-background/80 px-2 py-0.5 text-ui-10 uppercase tracking-[0.14em] text-muted-foreground ${item.status === 'running' ? 'text-shimmer' : ''}`}>
           {formatTaskStatusLabel(item.status)}
         </span>
       </div>
@@ -305,7 +305,7 @@ function CommandExecutionItem({ item }: { item: MessageItem }): ReactElement {
       >
         <div className="flex items-center justify-between gap-3">
           <p
-            className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground group-hover/cmd:text-foreground transition-colors truncate`}
+            className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground group-hover/cmd:text-foreground transition-colors truncate ${!finished ? 'text-shimmer' : ''}`}
           >
             {summaryPrefix} {truncateText(commandText, 110)}
           </p>
@@ -747,7 +747,7 @@ function ToolCallGroup({ items }: { items: MessageItem[] }): ReactElement {
         >
           <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
         </motion.div>
-        <span className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground`}>{groupLabel}</span>
+        <span className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground ${!allCompleted ? 'text-shimmer' : ''}`}>{groupLabel}</span>
         <span
           className={`${UI_TEXT_SIZE_CLASS} text-foreground/60 transition-colors group-hover/exploration:text-foreground`}
         >
