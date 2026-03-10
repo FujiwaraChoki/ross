@@ -1,5 +1,23 @@
-import { useCallback, useEffect, useRef, type ReactElement } from 'react'
-import { useCodexStore, type MessageItem } from '@/lib/store'
+import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import {
+  buildPersistedCodexStoreState,
+  useCodexStore,
+  type AvailableModel,
+  type AvailableModelReasoningEffort,
+  type CollaborationModeKind,
+  type Message,
+  type MessageItem,
+  type PersistedCodexStoreState,
+  type ReasoningEffort,
+  type TaskCard,
+  type Thread,
+  type TurnPlanSnapshot
+} from '@/lib/store'
+import {
+  buildThreadFromHistory,
+  normalizeProtocolItem,
+  parseAssistantText
+} from '@/lib/codex-normalization'
 import {
   canApplyServerThreadTitle,
   deriveAutomaticThreadTitle,
@@ -14,9 +32,29 @@ import SkillsTab from '@/components/skills-tab'
 import SettingsTab from '@/components/settings-tab'
 import ApprovalDialog from '@/components/approval-dialog'
 import CommandBar from '@/components/command-bar'
-import { applyUiPreferences } from '@/lib/ui-preferences'
+import PlanSheet from '@/components/plan-sheet'
+import KeyboardShortcuts from '@/components/keyboard-shortcuts'
+import { Toaster } from '@/components/ui/sonner'
+import {
+  applyUiPreferences,
+  clampCodeFontSize,
+  clampSansFontSize,
+  subscribeToSystemThemeChanges,
+  UI_CODE_FONT_SIZE_DEFAULT,
+  UI_SANS_FONT_SIZE_DEFAULT
+} from '@/lib/ui-preferences'
+import { DEFAULT_THEME_ID, getThemeFontOverrides } from '../../shared/theme'
 
 type EventPayload = Record<string, unknown>
+type ModelListEntry = {
+  id: AvailableModel['id']
+  name: AvailableModel['name']
+  defaultReasoningEffort: AvailableModel['defaultReasoningEffort']
+  supportedReasoningEfforts: AvailableModel['supportedReasoningEfforts']
+  hidden: boolean
+  upgrade: string | undefined
+  isDefault: boolean
+}
 
 function asObject(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null
@@ -24,6 +62,38 @@ function asObject(value: unknown): Record<string, unknown> | null {
 
 function getString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function getReasoningEffort(value: unknown): ReasoningEffort | null {
+  switch (value) {
+    case 'none':
+    case 'minimal':
+    case 'low':
+    case 'medium':
+    case 'high':
+    case 'xhigh':
+      return value
+    default:
+      return null
+  }
+}
+
+function normalizeSupportedReasoningEfforts(value: unknown): AvailableModelReasoningEffort[] {
+  if (!Array.isArray(value)) return []
+
+  return value
+    .map((entry) => {
+      const option = asObject(entry)
+      const reasoningEffort =
+        getReasoningEffort(option?.reasoningEffort) || getReasoningEffort(option?.effort)
+      if (!reasoningEffort) return null
+
+      return {
+        reasoningEffort,
+        description: getString(option?.description) || getString(option?.label) || reasoningEffort
+      }
+    })
+    .filter((entry): entry is AvailableModelReasoningEffort => Boolean(entry))
 }
 
 function extractText(value: unknown, depth = 0): string | undefined {
@@ -53,6 +123,16 @@ function extractText(value: unknown, depth = 0): string | undefined {
 function getEventItem(params: EventPayload): EventPayload {
   const nested = asObject(params.item)
   return nested || params
+}
+
+function getItemId(rawItem: EventPayload): string | undefined {
+  return (
+    getString(rawItem.id) ||
+    getString(rawItem.itemId) ||
+    getString(rawItem.item_id) ||
+    getString(rawItem.callId) ||
+    getString(rawItem.call_id)
+  )
 }
 
 function stringifyValue(value: unknown): string | undefined {
@@ -88,6 +168,131 @@ function getThreadIdFromParams(params: EventPayload): string | undefined {
 
 function getTurnStatusFromParams(params: EventPayload): string | undefined {
   return getString(asObject(params.turn)?.status) || getString(params.status)
+}
+
+function getCollaborationModeKind(value: unknown): CollaborationModeKind | null {
+  return value === 'plan' || value === 'default' ? value : null
+}
+
+function getCollaborationModeKindFromParams(params: EventPayload): CollaborationModeKind | null {
+  return (
+    getCollaborationModeKind(params.collaborationModeKind) ||
+    getCollaborationModeKind(params.collaboration_mode_kind) ||
+    getCollaborationModeKind(asObject(params.turn)?.collaborationModeKind) ||
+    getCollaborationModeKind(asObject(params.turn)?.collaboration_mode_kind) ||
+    null
+  )
+}
+
+function normalizeTurnPlanSnapshot(params: EventPayload): TurnPlanSnapshot | null {
+  const rawPlan = Array.isArray(params.plan) ? params.plan : []
+  const plan = rawPlan
+    .map((entry) => {
+      const step = asObject(entry)
+      const text = getString(step?.step)
+      if (!text) return null
+
+      const rawStatus = getString(step?.status)
+      return {
+        step: text,
+        status:
+          rawStatus === 'completed'
+            ? 'completed'
+            : rawStatus === 'inProgress' || rawStatus === 'in_progress'
+              ? 'inProgress'
+              : 'pending'
+      }
+    })
+    .filter((entry): entry is TurnPlanSnapshot['plan'][number] => Boolean(entry))
+
+  if (plan.length === 0 && !getString(params.explanation)) return null
+
+  return {
+    explanation: getString(params.explanation) || null,
+    plan
+  }
+}
+
+function getLatestUserPrompt(thread: Thread | undefined): string {
+  return thread?.messages.findLast((message) => message.role === 'user')?.content.trim() || ''
+}
+
+function getAssistantMarkdown(message: Message | undefined): string {
+  if (!message) return ''
+
+  const itemMarkdown = message.items
+    .filter((item) => item.type === 'agentMessage' && item.content.trim())
+    .map((item) => item.content.trim())
+
+  if (itemMarkdown.length > 0) {
+    return itemMarkdown.join('\n\n').trim()
+  }
+
+  return message.content.trim()
+}
+
+function getPlanMarkdown(message: Message | undefined): string {
+  if (!message) return ''
+
+  return message.items
+    .filter((item) => item.type === 'plan' && item.content.trim())
+    .map((item) => item.content.trim())
+    .join('\n\n')
+    .trim()
+}
+
+function buildPlanDocument(params: {
+  thread: Thread
+  assistantMessage: Message
+  turnPlan: TurnPlanSnapshot | null
+}): { title: string; content: string } | null {
+  const title = normalizeThreadTitleCandidate(params.thread.title) || 'Implementation plan'
+  const prompt = getLatestUserPrompt(params.thread)
+  const assistantMarkdown = getAssistantMarkdown(params.assistantMessage)
+  const planMarkdown = getPlanMarkdown(params.assistantMessage)
+  const outline = params.turnPlan?.plan ?? []
+
+  if (!assistantMarkdown && !planMarkdown && outline.length === 0) {
+    return null
+  }
+
+  const meta = new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'long',
+    timeStyle: 'short'
+  }).format(Date.now())
+  const metaParts = [meta, params.thread.project || null].filter(Boolean)
+  const sections = [`# ${title}`]
+
+  if (metaParts.length > 0) {
+    sections.push(`_${metaParts.join(' • ')}_`)
+  }
+
+  if (prompt) {
+    sections.push(`## Request\n\n${prompt}`)
+  }
+
+  if (params.turnPlan?.explanation) {
+    sections.push(`## Framing\n\n${params.turnPlan.explanation}`)
+  }
+
+  if (outline.length > 0) {
+    sections.push(
+      `## Execution Outline\n\n${outline
+        .map((step) => `- [${step.status === 'completed' ? 'x' : ' '}] ${step.step}`)
+        .join('\n')}`
+    )
+  }
+
+  if (assistantMarkdown) {
+    sections.push(`## Detailed Plan\n\n${assistantMarkdown}`)
+  } else if (planMarkdown) {
+    sections.push(`## Detailed Plan\n\n${planMarkdown}`)
+  }
+
+  return {
+    title,
+    content: sections.join('\n\n').trim()
+  }
 }
 
 function getErrorMessageFromParams(params: EventPayload): string | null {
@@ -173,6 +378,13 @@ function normalizeItemType(rawType: string | undefined): MessageItem['type'] {
       return 'reasoning'
     case 'plan':
       return 'plan'
+    case 'toolCall':
+    case 'tool_call':
+    case 'function_call':
+    case 'function_call_output':
+    case 'custom_tool_call':
+    case 'custom_tool_call_output':
+      return 'toolCall'
     case 'mcpToolCall':
     case 'mcp_tool_call':
       return 'mcpToolCall'
@@ -184,12 +396,15 @@ function normalizeItemType(rawType: string | undefined): MessageItem['type'] {
       return 'collabToolCall'
     case 'webSearch':
     case 'web_search':
+    case 'web_search_call':
       return 'webSearch'
     case 'imageView':
     case 'image_view':
       return 'imageView'
     case 'contextCompaction':
     case 'context_compaction':
+    case 'context_compacted':
+    case 'compacted':
       return 'contextCompaction'
     case 'enteredReviewMode':
     case 'entered_review_mode':
@@ -210,6 +425,7 @@ function isSkippableItem(rawItem: EventPayload): boolean {
 
 function isToolLikeItemType(type: MessageItem['type']): boolean {
   return (
+    type === 'toolCall' ||
     type === 'mcpToolCall' ||
     type === 'dynamicToolCall' ||
     type === 'collabToolCall' ||
@@ -222,11 +438,41 @@ function isToolLikeItemType(type: MessageItem['type']): boolean {
   )
 }
 
+function parseJsonLikeValue(value: unknown): unknown {
+  if (typeof value !== 'string') return value
+
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    return value
+  }
+
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return value
+  }
+}
+
+function getToolOutput(value: unknown): string | undefined {
+  const parsed = parseJsonLikeValue(value)
+  if (typeof parsed === 'string') return parsed
+
+  const obj = asObject(parsed)
+  if (!obj) return stringifyValue(parsed)
+
+  return (
+    getString(obj.output) || getString(asObject(obj.metadata)?.output) || stringifyValue(parsed)
+  )
+}
+
 function buildItemUpdates(rawItem: EventPayload): Partial<MessageItem> {
+  const rawType = getString(rawItem.type)
   const type = normalizeItemType(getString(rawItem.type))
   const changes = Array.isArray(rawItem.changes) ? rawItem.changes : []
   const firstChange = asObject(changes[0])
   const action = asObject(rawItem.action)
+  const target = asObject(rawItem.target)
+  const structuredOutput = parseJsonLikeValue(rawItem.output)
 
   let content = ''
   if (type === 'agentMessage' || type === 'plan' || type === 'reasoning') {
@@ -247,31 +493,49 @@ function buildItemUpdates(rawItem: EventPayload): Partial<MessageItem> {
 
   return {
     type,
+    rawType,
     content,
     phase: getString(rawItem.phase),
     status: getString(rawItem.status),
     command: getString(rawItem.command),
     cwd: getString(rawItem.cwd),
     output:
+      (type === 'toolCall' ? getToolOutput(rawItem.output) : undefined) ||
       getString(rawItem.aggregatedOutput) ||
       getString(rawItem.output) ||
       (type === 'commandExecution' ? getString(rawItem.content) : undefined),
     filePath: getString(firstChange?.path) || getString(rawItem.filePath),
     changeType: getString(firstChange?.kind) || getString(rawItem.changeType),
-    toolName: getString(rawItem.tool),
+    toolName: getString(rawItem.tool) || getString(rawItem.name),
     server: getString(rawItem.server),
-    argumentsText: stringifyValue(rawItem.arguments),
-    resultText: stringifyValue(rawItem.result),
-    query: getString(rawItem.query),
-    actionType: getString(action?.type),
+    callId: getString(rawItem.callId) || getString(rawItem.call_id),
+    argumentsText: stringifyValue(rawItem.arguments ?? rawItem.input),
+    resultText:
+      stringifyValue(rawItem.result) ||
+      (type === 'toolCall' && typeof structuredOutput !== 'string'
+        ? stringifyValue(structuredOutput)
+        : undefined),
+    query:
+      getString(rawItem.query) ||
+      getString(action?.query) ||
+      getString(action?.url) ||
+      getString(action?.pattern) ||
+      extractText(action?.queries),
+    actionType: getString(action?.type) || getString(target?.type),
     actionTarget:
-      getString(action?.query) || getString(action?.url) || getString(action?.pattern) || undefined,
-    summary: extractText(rawItem.summary)
+      getString(action?.query) ||
+      getString(action?.url) ||
+      getString(action?.pattern) ||
+      getString(target?.label) ||
+      getString(target?.type) ||
+      getString(rawItem.user_facing_hint) ||
+      undefined,
+    summary: extractText(rawItem.summary) || getString(rawItem.user_facing_hint)
   }
 }
 
 function buildMessageItem(rawItem: EventPayload): MessageItem {
-  const id = getString(rawItem.id) || getString(rawItem.itemId) || crypto.randomUUID()
+  const id = getItemId(rawItem) || crypto.randomUUID()
   return {
     id,
     completed: false,
@@ -292,11 +556,67 @@ function getThreadTitleFromResult(result: unknown): string | null {
   )
 }
 
+function normalizeModelList(result: unknown): ModelListEntry[] {
+  const payload = asObject(result)
+  const rawModels = Array.isArray(payload?.data)
+    ? payload.data
+    : Array.isArray(payload?.models)
+      ? payload.models
+      : []
+
+  return rawModels
+    .map((entry) => {
+      const model = asObject(entry)
+      if (!model) return null
+
+      const id = getString(model.id) || getString(model.model)
+      if (!id) return null
+
+      return {
+        id,
+        name: getString(model.displayName) || getString(model.name) || getString(model.model) || id,
+        defaultReasoningEffort:
+          getReasoningEffort(model.defaultReasoningEffort) ||
+          getReasoningEffort(model.default_reasoning_level),
+        supportedReasoningEfforts: normalizeSupportedReasoningEfforts(
+          model.supportedReasoningEfforts || model.supported_reasoning_levels
+        ),
+        hidden: model.hidden === true,
+        upgrade: getString(model.upgrade),
+        isDefault: model.isDefault === true
+      }
+    })
+    .filter((entry): entry is ModelListEntry => Boolean(entry))
+}
+
+function getVisibleModelList(models: ModelListEntry[]): ModelListEntry[] {
+  const nonHiddenModels = models.filter((model) => !model.hidden)
+  const currentModels = nonHiddenModels.filter((model) => !model.upgrade)
+
+  return currentModels.length > 0 ? currentModels : nonHiddenModels
+}
+
+function getPreferredModelId(models: ModelListEntry[], currentModel: string): string | null {
+  if (models.some((model) => model.id === currentModel)) {
+    return currentModel
+  }
+
+  return models.find((model) => model.isDefault)?.id || models[0]?.id || null
+}
+
 export default function App(): ReactElement {
   const {
+    activeThreadId,
     isAuthenticated,
     setAuthenticated,
+    setServerReady,
+    setAvailableModels,
+    setModel,
+    model,
+    reasoningEffort,
+    autonomyLevel,
     threads,
+    tasksByThreadId,
     setIsStreaming,
     approvalRequest,
     setApprovalRequest,
@@ -304,25 +624,111 @@ export default function App(): ReactElement {
     markThreadUnread,
     setStreamingThread,
     setActiveTurn,
+    setActiveTurnPlan,
     clearActiveTurn,
     activeTab,
     setActiveTab,
     activeProject,
+    recentProjects,
     createThread,
     updateThreadTitle,
     updateMessage,
     appendToMessage,
     addItemToMessage,
+    replaceMessageItems,
     appendToItemContent,
     updateItem,
     completeMessageItems,
     appendToItemOutput,
+    replaceThreads,
+    replaceTasksByThread,
+    upsertTask,
+    setPlanSheetOpen,
+    setSelectedPlanPath,
+    planModeEnabled,
+    hydrateFromPersistedState,
+    setThemes,
+    updateSettings,
+    themes,
     settings,
     isStreaming
   } = useCodexStore()
 
   const hasAppliedInitialSpeedPreferenceRef = useRef(false)
+  const lastPersistedAppStateRef = useRef<string | null>(null)
+  const appStateSaveTimeoutRef = useRef<number | null>(null)
+  const [appStateReady, setAppStateReady] = useState(false)
+  const [themeCatalogReady, setThemeCatalogReady] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const { isSidebarOpen, setIsSidebarOpen } = useCodexStore()
+  const selectedTheme = themes.find((theme) => theme.id === settings.themeId)
+
+  const adjustFontSizes = useCallback(
+    (delta: number): void => {
+      if (delta === 0) {
+        updateSettings({
+          sansFontSize: UI_SANS_FONT_SIZE_DEFAULT,
+          codeFontSize: UI_CODE_FONT_SIZE_DEFAULT
+        })
+        return
+      }
+
+      updateSettings({
+        sansFontSize: clampSansFontSize(settings.sansFontSize + delta),
+        codeFontSize: clampCodeFontSize(settings.codeFontSize + delta)
+      })
+    },
+    [settings.codeFontSize, settings.sansFontSize, updateSettings]
+  )
+
+  // Wire up Cmd+/- font size shortcuts from the main process
+  useEffect(() => {
+    return window.codex.onFontSizeShortcut(({ delta }) => adjustFontSizes(delta))
+  }, [adjustFontSizes])
+
+  const loadModels = useCallback(async (): Promise<void> => {
+    try {
+      const normalizedModels = normalizeModelList(await window.codex.modelList())
+      const visibleModels = getVisibleModelList(normalizedModels)
+      if (visibleModels.length === 0) return
+
+      setAvailableModels(
+        visibleModels.map(({ id, name, defaultReasoningEffort, supportedReasoningEfforts }) => ({
+          id,
+          name,
+          defaultReasoningEffort,
+          supportedReasoningEfforts
+        }))
+      )
+
+      const preferredModelId = getPreferredModelId(visibleModels, useCodexStore.getState().model)
+      if (preferredModelId && preferredModelId !== useCodexStore.getState().model) {
+        setModel(preferredModelId)
+      }
+    } catch (error) {
+      console.error('Failed to load model catalog:', error)
+    }
+  }, [setAvailableModels, setModel])
+
+  const loadThemes = useCallback(async (): Promise<void> => {
+    try {
+      const result = await window.codex.listThemes()
+      setThemes(result.themes)
+
+      const currentSettings = useCodexStore.getState().settings
+      if (!result.themes.some((theme) => theme.id === currentSettings.themeId)) {
+        const fallbackTheme = result.themes.find((theme) => theme.id === DEFAULT_THEME_ID)
+        useCodexStore.getState().updateSettings({
+          themeId: DEFAULT_THEME_ID,
+          ...getThemeFontOverrides(fallbackTheme)
+        })
+      }
+    } catch (error) {
+      console.error('Failed to load theme catalog:', error)
+    } finally {
+      setThemeCatalogReady(true)
+    }
+  }, [setThemes])
 
   const syncThreadTitleFromServer = useCallback(async (threadId: string): Promise<void> => {
     try {
@@ -347,6 +753,87 @@ export default function App(): ReactElement {
 
     await Promise.allSettled(threadIds.map((threadId) => syncThreadTitleFromServer(threadId)))
   }, [syncThreadTitleFromServer])
+
+  const hydrateThreadsFromServer = useCallback(async (): Promise<void> => {
+    try {
+      const listResult = await window.codex.threadList({})
+      const listPayload = asObject(listResult)
+      const rawThreads = Array.isArray(listPayload?.threads)
+        ? listPayload.threads
+        : Array.isArray(listPayload?.data)
+          ? listPayload.data
+          : []
+      const persistedThreads = useCodexStore.getState().threads
+      const persistedTaskMap = useCodexStore.getState().tasksByThreadId
+
+      const threadHeaders = rawThreads
+        .map((entry) => asObject(entry))
+        .filter((entry): entry is EventPayload => Boolean(entry))
+        .sort((left, right) => {
+          const leftUpdated = typeof left.updatedAt === 'number' ? left.updatedAt : 0
+          const rightUpdated = typeof right.updatedAt === 'number' ? right.updatedAt : 0
+          return rightUpdated - leftUpdated
+        })
+
+      if (threadHeaders.length === 0) return
+
+      const placeholderThreads: Thread[] = threadHeaders.map((rawThread) => {
+        const threadId = getString(rawThread.id) || crypto.randomUUID()
+        const persisted = persistedThreads.find((entry) => entry.id === threadId)
+        const projectPath = getString(rawThread.cwd) || persisted?.projectPath
+        return {
+          id: threadId,
+          title:
+            getString(rawThread.name) ||
+            getString(rawThread.preview) ||
+            persisted?.title ||
+            'New Thread',
+          project: persisted?.project || projectPath?.split('/').pop() || 'local',
+          projectPath,
+          createdAt:
+            typeof rawThread.createdAt === 'number'
+              ? rawThread.createdAt * 1000
+              : persisted?.createdAt || Date.now(),
+          messages: persisted?.messages || [],
+          pinned: persisted?.pinned || false,
+          unread: persisted?.unread || false,
+          archived: persisted?.archived || false
+        }
+      })
+
+      const activeId = useCodexStore.getState().activeThreadId
+      const recentIds = new Set(
+        placeholderThreads
+          .slice(0, 8)
+          .map((thread) => thread.id)
+          .concat(activeId ? [activeId] : [])
+      )
+
+      const hydratedEntries = await Promise.allSettled(
+        [...recentIds].map(async (threadId) => {
+          const placeholder = placeholderThreads.find((entry) => entry.id === threadId)
+          const result = await window.codex.threadRead({ threadId, includeTurns: true })
+          return buildThreadFromHistory(result, placeholder, persistedTaskMap[threadId] || [])
+        })
+      )
+
+      const hydratedThreads = new Map<string, Thread>()
+      const nextTasksByThread = { ...persistedTaskMap }
+
+      hydratedEntries.forEach((entry) => {
+        if (entry.status !== 'fulfilled') return
+        if (entry.value.thread) {
+          hydratedThreads.set(entry.value.thread.id, entry.value.thread)
+          nextTasksByThread[entry.value.thread.id] = entry.value.tasks
+        }
+      })
+
+      replaceThreads(placeholderThreads.map((thread) => hydratedThreads.get(thread.id) || thread))
+      replaceTasksByThread(nextTasksByThread)
+    } catch (error) {
+      console.error('Failed to hydrate threads from server:', error)
+    }
+  }, [replaceTasksByThread, replaceThreads])
 
   const addStatusItemToAssistant = useCallback(
     (threadId: string, messageId: string, itemId: string, text: string): void => {
@@ -382,10 +869,154 @@ export default function App(): ReactElement {
     [completeMessageItems, updateMessage]
   )
 
-  // Cmd+B to toggle sidebar, Cmd+, to toggle settings, Cmd/Ctrl+N for new thread
+  const postProcessAssistantMessage = useCallback(
+    (threadId: string, messageId: string): void => {
+      const thread = useCodexStore.getState().threads.find((entry) => entry.id === threadId)
+      const message = thread?.messages.find((entry) => entry.id === messageId)
+      if (!message) return
+
+      const nextItems: MessageItem[] = []
+      let changed = false
+
+      message.items.forEach((item) => {
+        if (item.type !== 'agentMessage' || !item.content.includes('::')) {
+          nextItems.push(item)
+          return
+        }
+
+        const parsed = parseAssistantText(item.content)
+        if (parsed.directives.length === 0) {
+          nextItems.push(item)
+          return
+        }
+
+        changed = true
+        if (parsed.text) {
+          nextItems.push({
+            ...item,
+            content: parsed.text
+          })
+        }
+
+        parsed.directives.forEach((directive, index) => {
+          nextItems.push({
+            id: `${item.id}:directive:${index}`,
+            type: 'directive',
+            rawType: item.rawType || 'message',
+            rawFamily: item.rawFamily || 'history',
+            semanticCategory: 'directive',
+            phase: item.phase,
+            content: directive.source,
+            directive,
+            completed: true
+          })
+        })
+      })
+
+      if (!changed) return
+
+      replaceMessageItems(threadId, messageId, nextItems)
+      updateMessage(threadId, messageId, {
+        content: nextItems
+          .filter((item) => item.type === 'agentMessage')
+          .map((item) => item.content)
+          .filter(Boolean)
+          .join('\n\n')
+          .trim()
+      })
+    },
+    [replaceMessageItems, updateMessage]
+  )
+
+  const applyTaskUpdatesToThread = useCallback(
+    (threadId: string, updates: TaskCard[]): void => {
+      if (updates.length === 0) return
+
+      updates.forEach((task) => {
+        const existingTasks = useCodexStore.getState().tasksByThreadId[threadId] || []
+        const normalizedTask = { ...task, threadId }
+        const directMatch =
+          existingTasks.find((entry) => entry.id === normalizedTask.id) ||
+          (normalizedTask.agentId
+            ? existingTasks.find((entry) => entry.agentId === normalizedTask.agentId)
+            : undefined) ||
+          (normalizedTask.turnId
+            ? existingTasks.find((entry) => entry.turnId === normalizedTask.turnId)
+            : undefined)
+
+        const pendingTasks = existingTasks.filter((entry) =>
+          ['queued', 'running', 'waiting'].includes(entry.status)
+        )
+        const heuristicMatch =
+          directMatch ||
+          (!normalizedTask.agentId &&
+          normalizedTask.turnId &&
+          pendingTasks.length === 1 &&
+          ['running', 'completed', 'failed'].includes(normalizedTask.status)
+            ? pendingTasks[0]
+            : undefined)
+
+        upsertTask(threadId, {
+          ...(heuristicMatch || {}),
+          ...normalizedTask,
+          id: heuristicMatch?.id || normalizedTask.id,
+          threadId,
+          title: normalizedTask.title || heuristicMatch?.title || 'Background task',
+          linkedCallIds: [
+            ...new Set([
+              ...(heuristicMatch?.linkedCallIds || []),
+              ...(normalizedTask.linkedCallIds || [])
+            ])
+          ],
+          linkedTranscriptItemIds: [
+            ...new Set([
+              ...(heuristicMatch?.linkedTranscriptItemIds || []),
+              ...(normalizedTask.linkedTranscriptItemIds || [])
+            ])
+          ],
+          results: [
+            ...new Set([...(heuristicMatch?.results || []), ...(normalizedTask.results || [])])
+          ]
+        })
+      })
+    },
+    [upsertTask]
+  )
+
+  const persistPlanDocument = useCallback(
+    async (params: {
+      thread: Thread
+      assistantMessage: Message
+      turnPlan: TurnPlanSnapshot | null
+    }): Promise<void> => {
+      const planDocument = buildPlanDocument(params)
+      if (!planDocument) return
+
+      try {
+        const savedPlan = await window.codex.savePlan(planDocument)
+        setSelectedPlanPath(savedPlan.path)
+        setPlanSheetOpen(true)
+      } catch (error) {
+        console.error('Failed to persist plan document:', error)
+      }
+    },
+    [setPlanSheetOpen, setSelectedPlanPath]
+  )
+
+  const { setActiveProject } = useCodexStore()
+
+  // Listen for "Open Project" from the native menu bar
+  useEffect(() => {
+    return window.codex.onOpenProjectResult(({ path, name }) => {
+      setActiveProject({ path, name })
+    })
+  }, [setActiveProject])
+
+  // Cmd/Ctrl shortcuts for app actions.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent): void => {
       const mod = e.metaKey || e.ctrlKey
+
       if (mod && e.key === 'b') {
         e.preventDefault()
         setIsSidebarOpen(!isSidebarOpen)
@@ -411,34 +1042,139 @@ export default function App(): ReactElement {
             setActiveTab('threads')
           })
       }
+      if (mod && e.shiftKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault()
+        const store = useCodexStore.getState()
+        store.setPlanModeEnabled(!store.planModeEnabled)
+      }
+      if (mod && e.key === 'o') {
+        e.preventDefault()
+        window.codex
+          .openProject()
+          .then((result) => {
+            if (result) {
+              const { path, name } = result as { path: string; name: string }
+              setActiveProject({ path, name })
+            }
+          })
+          .catch((err) => console.error('Failed to open folder:', err))
+      }
+      if (mod && e.key === '/') {
+        e.preventDefault()
+        setShortcutsOpen((v) => !v)
+      }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [isSidebarOpen, setIsSidebarOpen, activeTab, setActiveTab, activeProject, createThread])
+  }, [
+    isSidebarOpen,
+    setIsSidebarOpen,
+    activeTab,
+    setActiveTab,
+    activeProject,
+    createThread,
+    setActiveProject,
+    adjustFontSizes
+  ])
 
   useEffect(() => {
     let cancelled = false
 
-    void window.codex.isAuthenticated().then(async (auth) => {
+    void (async () => {
+      try {
+        const storedState = await window.codex.loadAppState()
+        if (cancelled) return
+
+        const persistedState = asObject(storedState) as Partial<PersistedCodexStoreState> | null
+        if (persistedState) {
+          hydrateFromPersistedState(persistedState)
+          lastPersistedAppStateRef.current = JSON.stringify(
+            buildPersistedCodexStoreState(useCodexStore.getState())
+          )
+        }
+      } catch (error) {
+        console.error('Failed to load persisted app state:', error)
+      }
+
+      await loadThemes()
+
+      if (cancelled) return
+      setAppStateReady(true)
+
+      const auth = await window.codex.isAuthenticated()
       if (cancelled) return
 
       setAuthenticated(auth)
-      if (auth) {
-        try {
-          await window.codex.startServer()
-          if (!cancelled) {
-            await syncKnownThreadTitlesFromServer()
-          }
-        } catch (error) {
-          console.error(error)
+      if (!auth) return
+
+      try {
+        await window.codex.startServer()
+        if (!cancelled) {
+          setServerReady(true)
+          void loadModels()
+          await hydrateThreadsFromServer()
+          await syncKnownThreadTitlesFromServer()
         }
+      } catch (error) {
+        console.error(error)
       }
-    })
+    })()
 
     return () => {
       cancelled = true
     }
-  }, [setAuthenticated, syncKnownThreadTitlesFromServer])
+  }, [
+    hydrateFromPersistedState,
+    hydrateThreadsFromServer,
+    loadModels,
+    loadThemes,
+    setAuthenticated,
+    setServerReady,
+    syncKnownThreadTitlesFromServer
+  ])
+
+  useEffect(() => {
+    if (!appStateReady) return
+
+    const snapshot = buildPersistedCodexStoreState(useCodexStore.getState())
+    const serializedSnapshot = JSON.stringify(snapshot)
+    if (lastPersistedAppStateRef.current === serializedSnapshot) return
+
+    if (appStateSaveTimeoutRef.current) {
+      clearTimeout(appStateSaveTimeoutRef.current)
+    }
+
+    appStateSaveTimeoutRef.current = window.setTimeout(() => {
+      void window.codex
+        .saveAppState(snapshot)
+        .then((saved) => {
+          if (!saved) return
+          lastPersistedAppStateRef.current = serializedSnapshot
+        })
+        .catch((error) => console.error('Failed to persist app state:', error))
+    }, 150)
+
+    return () => {
+      if (appStateSaveTimeoutRef.current) {
+        clearTimeout(appStateSaveTimeoutRef.current)
+        appStateSaveTimeoutRef.current = null
+      }
+    }
+  }, [
+    appStateReady,
+    activeThreadId,
+    activeTab,
+    activeProject,
+    autonomyLevel,
+    isSidebarOpen,
+    model,
+    planModeEnabled,
+    reasoningEffort,
+    recentProjects,
+    settings,
+    tasksByThreadId,
+    threads
+  ])
 
   useEffect(() => {
     for (const thread of threads) {
@@ -452,8 +1188,27 @@ export default function App(): ReactElement {
   }, [threads, updateThreadTitle])
 
   useEffect(() => {
-    applyUiPreferences(settings)
-  }, [settings])
+    applyUiPreferences(settings, selectedTheme)
+  }, [selectedTheme, settings])
+
+  useEffect(() => {
+    if (!themeCatalogReady || themes.length === 0 || selectedTheme) return
+    const fallbackTheme = themes.find((theme) => theme.id === DEFAULT_THEME_ID)
+    updateSettings({
+      themeId: DEFAULT_THEME_ID,
+      ...getThemeFontOverrides(fallbackTheme)
+    })
+  }, [selectedTheme, themeCatalogReady, themes, updateSettings])
+
+  useEffect(() => {
+    if (settings.themeMode !== 'system') return
+
+    return subscribeToSystemThemeChanges(() => {
+      const store = useCodexStore.getState()
+      const currentTheme = store.themes.find((theme) => theme.id === store.settings.themeId)
+      applyUiPreferences(store.settings, currentTheme)
+    })
+  }, [settings.themeId, settings.themeMode, themes])
 
   useEffect(() => {
     void window.codex
@@ -499,6 +1254,8 @@ export default function App(): ReactElement {
         activeThreadId,
         activeTab,
         activeTurnId,
+        activeTurnMode,
+        activeTurnPlan,
         activeTurnThreadId,
         streamingThreadId,
         threads: currentThreads
@@ -515,6 +1272,7 @@ export default function App(): ReactElement {
         case 'turn/started':
         case 'turn.started': {
           const turnId = getTurnIdFromParams(p)
+          const collaborationModeKind = getCollaborationModeKindFromParams(p)
           const nextThreadId = resolveThreadIdForEvent(p, {
             threads: currentThreads,
             activeTurnId,
@@ -523,10 +1281,59 @@ export default function App(): ReactElement {
           })
           if (!nextThreadId) break
           setStreamingThread(nextThreadId)
+          setActiveTurnPlan(null)
           if (turnId && nextThreadId) {
-            setActiveTurn(nextThreadId, turnId)
+            setActiveTurn(
+              nextThreadId,
+              turnId,
+              collaborationModeKind || activeTurnMode || 'default'
+            )
           }
           setIsStreaming(true)
+          break
+        }
+
+        case 'turn/plan/updated':
+        case 'turn.plan.updated': {
+          const turnId = getTurnIdFromParams(p)
+          if (activeTurnId && turnId && activeTurnId !== turnId) break
+          setActiveTurnPlan(normalizeTurnPlanSnapshot(p))
+          break
+        }
+
+        case 'task_started':
+        case 'task_complete': {
+          const threadId = resolveThreadIdForEvent(p, {
+            threads: currentThreads,
+            activeTurnId,
+            activeTurnThreadId,
+            streamingThreadId
+          })
+          if (!threadId) break
+
+          const normalized = normalizeProtocolItem(p, {
+            rawFamily: 'event_msg'
+          })
+          applyTaskUpdatesToThread(
+            threadId,
+            normalized.taskUpdates.map((task) => ({
+              ...task,
+              linkedTranscriptItemIds: [
+                ...new Set([
+                  ...(task.linkedTranscriptItemIds || []),
+                  ...normalized.transcriptItems.map((item) => item.id)
+                ])
+              ]
+            }))
+          )
+
+          const currentAssistantId = getAssistantMessageIdForThread(currentThreads, threadId)
+          if (currentAssistantId) {
+            normalized.transcriptItems.forEach((item) => {
+              addItemToMessage(threadId, currentAssistantId, item)
+            })
+          }
+
           break
         }
 
@@ -588,7 +1395,18 @@ export default function App(): ReactElement {
           if (currentAssistantId && threadId) {
             const eventItem = getEventItem(p)
             if (isSkippableItem(eventItem)) break
-            addItemToMessage(threadId, currentAssistantId, buildMessageItem(eventItem))
+            const normalized = normalizeProtocolItem(eventItem, {
+              rawFamily: 'response_item',
+              phase: getString(eventItem.phase)
+            })
+            const nextItem = normalized.transcriptItems[0] || {
+              ...buildMessageItem(eventItem),
+              rawFamily: 'response_item'
+            }
+            addItemToMessage(threadId, currentAssistantId, {
+              ...nextItem,
+              completed: false
+            })
           }
           break
         }
@@ -609,13 +1427,41 @@ export default function App(): ReactElement {
           if (currentAssistantId && threadId) {
             const eventItem = getEventItem(p)
             if (isSkippableItem(eventItem)) break
-            const itemId =
-              getString(eventItem.id) || getString(eventItem.itemId) || getString(p.itemId)
+            const itemId = getItemId(eventItem) || getItemId(p)
             if (itemId) {
               const thread = currentThreads.find((t) => t.id === threadId)
               const msg = thread?.messages.find((m) => m.id === currentAssistantId)
               const existingItem = msg?.items.find((i) => i.id === itemId)
-              const nextUpdates = buildItemUpdates(eventItem)
+              const enrichedEventItem =
+                (getString(eventItem.type) === 'function_call_output' ||
+                  getString(eventItem.type) === 'custom_tool_call_output') &&
+                existingItem?.toolName
+                  ? {
+                      ...eventItem,
+                      name: existingItem.toolName,
+                      tool: existingItem.toolName,
+                      server: existingItem.server
+                    }
+                  : eventItem
+              const normalized = normalizeProtocolItem(enrichedEventItem, {
+                rawFamily: 'response_item',
+                phase: getString(enrichedEventItem.phase)
+              })
+              const normalizedItem =
+                normalized.transcriptItems.find(
+                  (item) =>
+                    item.id === itemId ||
+                    item.callId === itemId ||
+                    item.callId === existingItem?.callId
+                ) || normalized.transcriptItems[0]
+              const nextUpdates = normalizedItem
+                ? {
+                    ...normalizedItem,
+                    content: normalizedItem.content,
+                    output: normalizedItem.output,
+                    summary: normalizedItem.summary
+                  }
+                : buildItemUpdates(enrichedEventItem)
 
               const type =
                 nextUpdates.type && nextUpdates.type !== 'unknown'
@@ -633,6 +1479,16 @@ export default function App(): ReactElement {
                 summary,
                 completed: true
               })
+
+              applyTaskUpdatesToThread(
+                threadId,
+                normalized.taskUpdates.map((task) => ({
+                  ...task,
+                  linkedTranscriptItemIds: [
+                    ...new Set([...(task.linkedTranscriptItemIds || []), itemId])
+                  ]
+                }))
+              )
             }
           }
           break
@@ -652,7 +1508,7 @@ export default function App(): ReactElement {
             ? getAssistantMessageIdForThread(currentThreads, threadId)
             : null
           if (currentAssistantId && threadId) {
-            const itemId = getString(p.id) || getString(p.itemId)
+            const itemId = getItemId(p)
             const delta = getString(p.output) || getString(p.delta) || ''
             if (itemId && delta) {
               appendToItemOutput(threadId, currentAssistantId, itemId, delta)
@@ -675,7 +1531,7 @@ export default function App(): ReactElement {
             ? getAssistantMessageIdForThread(currentThreads, threadId)
             : null
           if (currentAssistantId && threadId) {
-            const itemId = getString(p.id) || getString(p.itemId)
+            const itemId = getItemId(p)
             const delta = getString(p.output) || getString(p.delta) || ''
             if (itemId && delta) {
               appendToItemOutput(threadId, currentAssistantId, itemId, delta)
@@ -698,7 +1554,7 @@ export default function App(): ReactElement {
             ? getAssistantMessageIdForThread(currentThreads, threadId)
             : null
           if (currentAssistantId && threadId) {
-            const itemId = getString(p.id) || getString(p.itemId)
+            const itemId = getItemId(p)
             const delta = extractText(p.text) || extractText(p.delta) || ''
             if (!itemId || !delta) break
 
@@ -723,7 +1579,7 @@ export default function App(): ReactElement {
             ? getAssistantMessageIdForThread(currentThreads, threadId)
             : null
           if (currentAssistantId && threadId) {
-            const itemId = getString(p.id) || getString(p.itemId)
+            const itemId = getItemId(p)
             const delta =
               extractText(p.summaryText) || extractText(p.text) || extractText(p.delta) || ''
             if (!itemId || !delta) break
@@ -747,7 +1603,7 @@ export default function App(): ReactElement {
             ? getAssistantMessageIdForThread(currentThreads, threadId)
             : null
           if (currentAssistantId && threadId) {
-            const itemId = getString(p.id) || getString(p.itemId)
+            const itemId = getItemId(p)
             if (!itemId) break
             appendToItemContent(threadId, currentAssistantId, itemId, 'reasoning', '\n\n')
           }
@@ -797,11 +1653,20 @@ export default function App(): ReactElement {
           const currentAssistantId = threadId
             ? getAssistantMessageIdForThread(currentThreads, threadId)
             : null
+          const thread = threadId ? currentThreads.find((entry) => entry.id === threadId) : null
+          const assistantMessage =
+            currentAssistantId && thread
+              ? thread.messages.find((message) => message.id === currentAssistantId) || null
+              : null
+          const shouldPersistPlan =
+            activeTurnMode === 'plan' &&
+            thread != null &&
+            assistantMessage != null &&
+            getTurnStatusFromParams(p) !== 'failed'
+
           if (currentAssistantId && threadId) {
             const turnStatus = getTurnStatusFromParams(p)
             const failureText = turnStatus === 'failed' ? getErrorMessageFromParams(p) : null
-            const thread = currentThreads.find((t) => t.id === threadId)
-            const assistantMessage = thread?.messages.find((m) => m.id === currentAssistantId)
             const shouldAddStoppedFallback =
               turnStatus === 'interrupted' &&
               assistantMessage != null &&
@@ -812,6 +1677,7 @@ export default function App(): ReactElement {
               fallbackContent: shouldAddStoppedFallback ? 'Stopped.' : undefined,
               itemStatus: turnStatus
             })
+            postProcessAssistantMessage(threadId, currentAssistantId)
             if (failureText) {
               addStatusItemToAssistant(
                 threadId,
@@ -829,6 +1695,13 @@ export default function App(): ReactElement {
           setStreamingThread(null)
           clearActiveTurn()
           setApprovalRequest(null)
+          if (shouldPersistPlan && thread && assistantMessage) {
+            void persistPlanDocument({
+              thread,
+              assistantMessage,
+              turnPlan: activeTurnPlan
+            })
+          }
           break
         }
 
@@ -900,13 +1773,17 @@ export default function App(): ReactElement {
     markThreadUnread,
     setStreamingThread,
     setActiveTurn,
+    setActiveTurnPlan,
     clearActiveTurn,
     setApprovalRequest,
     setAuthenticated,
     remapThreadId,
     syncThreadTitleFromServer,
+    applyTaskUpdatesToThread,
     addStatusItemToAssistant,
-    finalizeAssistantMessage
+    finalizeAssistantMessage,
+    postProcessAssistantMessage,
+    persistPlanDocument
   ])
 
   const handleLogin = async (): Promise<void> => {
@@ -915,6 +1792,9 @@ export default function App(): ReactElement {
     setAuthenticated(auth)
     if (auth) {
       await window.codex.startServer()
+      setServerReady(true)
+      await loadModels()
+      await hydrateThreadsFromServer()
     }
   }
 
@@ -992,7 +1872,10 @@ export default function App(): ReactElement {
         />
       )}
 
+      <PlanSheet />
       <CommandBar />
+      <KeyboardShortcuts open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      <Toaster />
     </div>
   )
 }

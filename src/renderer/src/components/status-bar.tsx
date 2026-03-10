@@ -5,7 +5,7 @@ export default function StatusBar(): ReactElement {
   const { activeProject } = useCodexStore()
 
   return (
-    <div className="h-6 flex items-center justify-between px-3 border-t border-border bg-background text-[11px] text-muted-foreground shrink-0">
+    <div className="h-6 flex items-center justify-between px-3 border-t border-border bg-background text-ui-11 text-muted-foreground shrink-0">
       {/* Left */}
       <div className="flex items-center gap-3">
         {/* Project */}

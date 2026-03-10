@@ -13,7 +13,7 @@ function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(' ')
 }
 
-const UI_TEXT_SIZE_CLASS = 'text-[length:var(--app-ui-font-size)]'
+const UI_TEXT_SIZE_CLASS = 'text-[14px]'
 
 function extractText(children: ReactNode): string {
   if (typeof children === 'string') return children
@@ -123,7 +123,10 @@ export default function MarkdownRenderer({
           h1: ({ className, children, ...props }) => (
             <h1
               {...props}
-              className={cx('mt-5 mb-3 text-[1.4rem] font-semibold tracking-tight', className)}
+              className={cx(
+                'mt-5 mb-3 text-ui-markdown-h1 font-semibold tracking-tight',
+                className
+              )}
             >
               {children}
             </h1>
@@ -131,18 +134,21 @@ export default function MarkdownRenderer({
           h2: ({ className, children, ...props }) => (
             <h2
               {...props}
-              className={cx('mt-5 mb-3 text-[1.15rem] font-semibold tracking-tight', className)}
+              className={cx(
+                'mt-5 mb-3 text-ui-markdown-h2 font-semibold tracking-tight',
+                className
+              )}
             >
               {children}
             </h2>
           ),
           h3: ({ className, children, ...props }) => (
-            <h3 {...props} className={cx('mt-4 mb-2 text-[1rem] font-semibold', className)}>
+            <h3 {...props} className={cx('mt-4 mb-2 text-ui-markdown-h3 font-semibold', className)}>
               {children}
             </h3>
           ),
           h4: ({ className, children, ...props }) => (
-            <h4 {...props} className={cx('mt-4 mb-2 text-[0.95rem] font-semibold', className)}>
+            <h4 {...props} className={cx('mt-4 mb-2 text-ui-markdown-h4 font-semibold', className)}>
               {children}
             </h4>
           ),
@@ -206,7 +212,7 @@ export default function MarkdownRenderer({
               <table
                 {...props}
                 className={cx(
-                  'min-w-full border-collapse text-left text-[length:var(--app-ui-font-size)]',
+                  'min-w-full border-collapse text-left text-[14px]',
                   className
                 )}
               >

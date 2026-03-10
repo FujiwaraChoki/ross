@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import type { ReactElement } from 'react'
 import { createHighlighter, type Highlighter } from 'shiki'
+import { toast } from 'sonner'
 
 let highlighterPromise: Promise<Highlighter> | null = null
 
@@ -64,16 +65,17 @@ export default function CodeBlock({ code, language = 'text' }: CodeBlockProps): 
   const copyToClipboard = useCallback((): void => {
     navigator.clipboard.writeText(code)
     setCopied(true)
+    toast.success('Copied')
     setTimeout(() => setCopied(false), 2000)
   }, [code])
 
   return (
     <div className="rounded-md overflow-hidden border border-border my-1.5 text-[length:var(--app-code-font-size)]">
       <div className="flex items-center justify-between px-3 py-1 bg-secondary border-b border-border">
-        <span className="text-[11px] text-muted-foreground font-mono">{language}</span>
+        <span className="text-ui-11 text-muted-foreground font-mono">{language}</span>
         <button
           onClick={copyToClipboard}
-          className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+          className="text-ui-11 text-muted-foreground hover:text-foreground transition-colors"
         >
           {copied ? <span className="text-green-500">Copied</span> : 'Copy'}
         </button>

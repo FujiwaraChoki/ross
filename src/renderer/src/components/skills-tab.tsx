@@ -81,7 +81,7 @@ function SkillIcon({ name }: { name: string }): ReactElement {
     <div
       className={`size-9 shrink-0 rounded-lg bg-gradient-to-br ${gradient} flex items-center justify-center`}
     >
-      <span className="text-[11px] font-semibold text-white leading-none">{initials}</span>
+      <span className="text-ui-11 font-semibold text-white leading-none">{initials}</span>
     </div>
   )
 }
@@ -184,8 +184,8 @@ export default function SkillsTab(): ReactElement {
         {/* Header */}
         <div className="flex items-start justify-between gap-4 mb-1">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Skills</h1>
-            <p className="text-[13px] text-muted-foreground mt-1">
+            <h1 className="text-ui-2xl font-semibold tracking-tight">Skills</h1>
+            <p className="text-ui-13 text-muted-foreground mt-1">
               Give Codex superpowers.{' '}
               <span className="text-blue-500 hover:underline cursor-pointer">Learn more</span>
             </p>
@@ -195,7 +195,7 @@ export default function SkillsTab(): ReactElement {
             <button
               onClick={() => void loadSkills(true)}
               disabled={isLoading || isReloading}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-[13px] text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-ui-13 text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
             >
               <RefreshCw className={`size-3.5 ${isReloading ? 'animate-spin' : ''}`} />
               Refresh
@@ -208,11 +208,11 @@ export default function SkillsTab(): ReactElement {
                 placeholder="Search skills"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="h-8 w-44 rounded-md border border-border bg-background pl-8 pr-3 text-[13px] placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                className="h-8 w-44 rounded-md border border-border bg-background pl-8 pr-3 text-ui-13 placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
               />
             </div>
 
-            <button className="flex items-center gap-1.5 px-3 py-1.5 text-[13px] bg-foreground text-background rounded-md hover:opacity-90 transition-opacity font-medium">
+            <button className="flex items-center gap-1.5 px-3 py-1.5 text-ui-13 bg-foreground text-background rounded-md hover:opacity-90 transition-opacity font-medium">
               <Plus className="size-3.5" />
               New skill
             </button>
@@ -221,21 +221,21 @@ export default function SkillsTab(): ReactElement {
 
         {/* Error */}
         {error && (
-          <div className="rounded-lg border border-red-500/25 bg-red-500/5 px-3 py-2 text-[13px] text-red-600 mt-4">
+          <div className="rounded-lg border border-red-500/25 bg-red-500/5 px-3 py-2 text-ui-13 text-red-600 mt-4">
             {error}
           </div>
         )}
 
         {/* Loading */}
         {isLoading && (
-          <div className="mt-12 text-center text-[13px] text-muted-foreground">
+          <div className="mt-12 text-center text-ui-13 text-muted-foreground">
             Loading skills...
           </div>
         )}
 
         {/* Empty */}
         {!isLoading && allSkills.length === 0 && !error && (
-          <div className="mt-12 text-center text-[13px] text-muted-foreground">
+          <div className="mt-12 text-center text-ui-13 text-muted-foreground">
             No skills found for the current workspace.
           </div>
         )}
@@ -243,7 +243,7 @@ export default function SkillsTab(): ReactElement {
         {/* Skills grid */}
         {!isLoading && filtered.length > 0 && (
           <div className="mt-6">
-            <p className="text-[13px] font-medium text-muted-foreground mb-4">Installed</p>
+            <p className="text-ui-13 font-medium text-muted-foreground mb-4">Installed</p>
 
             <div className="grid grid-cols-2 gap-x-6 gap-y-4">
               {filtered.map((skill) => {
@@ -258,13 +258,13 @@ export default function SkillsTab(): ReactElement {
                     <SkillIcon name={skill.name} />
                     <div className="flex-1 min-w-0 pt-0.5">
                       <div className="flex items-center gap-2 min-w-0">
-                        <span className="text-[13px] font-semibold truncate">{displayName}</span>
-                        <span className="flex items-center gap-1 text-[11px] text-muted-foreground shrink-0">
+                        <span className="text-ui-13 font-semibold truncate">{displayName}</span>
+                        <span className="flex items-center gap-1 text-ui-11 text-muted-foreground shrink-0">
                           <Folder className="size-3" />
                           {skill.source}
                         </span>
                       </div>
-                      <p className="text-[12px] text-muted-foreground mt-0.5 truncate">
+                      <p className="text-ui-12 text-muted-foreground mt-0.5 truncate">
                         {description}
                       </p>
                     </div>
@@ -283,7 +283,7 @@ export default function SkillsTab(): ReactElement {
 
         {/* Search with no results */}
         {!isLoading && filtered.length === 0 && allSkills.length > 0 && (
-          <div className="mt-12 text-center text-[13px] text-muted-foreground">
+          <div className="mt-12 text-center text-ui-13 text-muted-foreground">
             No skills match &ldquo;{search}&rdquo;
           </div>
         )}

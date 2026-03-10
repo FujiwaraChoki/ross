@@ -16,6 +16,16 @@ interface PendingRequest {
   reject: (reason: Error) => void
 }
 
+interface TurnStartResultShape {
+  turn?: {
+    id?: unknown
+    collaborationModeKind?: unknown
+    collaboration_mode_kind?: unknown
+  } | null
+  collaborationModeKind?: unknown
+  collaboration_mode_kind?: unknown
+}
+
 export class CodexServer {
   private proc: ChildProcess | null = null
   private rl: readline.Interface | null = null
@@ -129,7 +139,7 @@ export class CodexServer {
 
   async turnStart(params: Record<string, unknown>): Promise<unknown> {
     try {
-      return await this.request('turn/start', params)
+      return await this.requestTurnStartWithCompatibility(params)
     } catch (error) {
       if (!this.matchesError(error, ['thread not found', 'invalid thread id'])) {
         throw error
@@ -153,7 +163,7 @@ export class CodexServer {
         })
       }
 
-      return this.request('turn/start', { ...params, threadId: newThreadId })
+      return this.requestTurnStartWithCompatibility({ ...params, threadId: newThreadId })
     }
   }
 
@@ -253,5 +263,48 @@ export class CodexServer {
           ? error.toLowerCase()
           : ''
     return needles.some((needle) => message.includes(needle))
+  }
+
+  private async requestTurnStartWithCompatibility(
+    params: Record<string, unknown>
+  ): Promise<unknown> {
+    try {
+      return await this.request('turn/start', params)
+    } catch (error) {
+      if (
+        !('collaborationMode' in params) ||
+        !this.matchesError(error, ['requires experimentalapi capability'])
+      ) {
+        throw error
+      }
+
+      const { collaborationMode: _collaborationMode, ...fallbackParams } = params
+      const result = await this.request('turn/start', fallbackParams)
+      return this.withTurnStartModeFallback(result, 'default')
+    }
+  }
+
+  private withTurnStartModeFallback(
+    result: unknown,
+    collaborationModeKind: 'default' | 'plan'
+  ): unknown {
+    if (typeof result !== 'object' || result === null) {
+      return result
+    }
+
+    const typedResult = result as TurnStartResultShape
+    const nextResult: TurnStartResultShape = {
+      ...typedResult,
+      collaborationModeKind
+    }
+
+    if (typedResult.turn && typeof typedResult.turn === 'object') {
+      nextResult.turn = {
+        ...typedResult.turn,
+        collaborationModeKind
+      }
+    }
+
+    return nextResult
   }
 }

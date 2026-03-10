@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, type ReactElement, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { toast } from 'sonner'
 import { ANIMATION_EASE } from '@/lib/animations'
 import { Switch } from '@/components/ui/switch'
 import { useCodexStore } from '@/lib/store'
@@ -65,10 +66,13 @@ export default function GitModal({ open, onClose }: GitModalProps): ReactElement
         if (result.error) {
           setError(result.error)
         } else {
+          toast.success('Changes committed')
           onClose()
         }
       } else {
-        setError(result.error || 'Commit failed')
+        const msg = result.error || 'Commit failed'
+        toast.error(msg)
+        setError(msg)
       }
     } catch (err) {
       setError((err as Error).message)
@@ -178,18 +182,18 @@ export default function GitModal({ open, onClose }: GitModalProps): ReactElement
               </button>
             </div>
 
-            <h2 className="text-[17px] font-semibold text-foreground mb-5">Commit your changes</h2>
+            <h2 className="text-ui-17 font-semibold text-foreground mb-5">Commit your changes</h2>
 
             {loading ? (
-              <div className="py-8 text-center text-[13px] text-muted-foreground">
+              <div className="py-8 text-center text-ui-13 text-muted-foreground">
                 Loading git status...
               </div>
             ) : (
               <>
                 {/* Branch */}
                 <div className="flex items-center justify-between py-2">
-                  <span className="text-[13px] font-medium text-foreground">Branch</span>
-                  <div className="flex items-center gap-1.5 text-[13px] text-muted-foreground">
+                  <span className="text-ui-13 font-medium text-foreground">Branch</span>
+                  <div className="flex items-center gap-1.5 text-ui-13 text-muted-foreground">
                     <svg
                       viewBox="0 0 24 24"
                       fill="none"
@@ -210,8 +214,8 @@ export default function GitModal({ open, onClose }: GitModalProps): ReactElement
 
                 {/* Changes */}
                 <div className="flex items-center justify-between py-2 mb-1">
-                  <span className="text-[13px] font-medium text-foreground">Changes</span>
-                  <div className="flex items-center gap-2 text-[13px]">
+                  <span className="text-ui-13 font-medium text-foreground">Changes</span>
+                  <div className="flex items-center gap-2 text-ui-13">
                     <span className="text-muted-foreground">
                       {status?.filesChanged || 0} file{(status?.filesChanged || 0) !== 1 ? 's' : ''}
                     </span>
@@ -227,12 +231,12 @@ export default function GitModal({ open, onClose }: GitModalProps): ReactElement
                     onCheckedChange={setIncludeUnstaged}
                     size="sm"
                   />
-                  <span className="text-[13px] text-foreground">Include unstaged</span>
+                  <span className="text-ui-13 text-foreground">Include unstaged</span>
                 </div>
 
                 {/* Commit message */}
                 <div className="mb-5">
-                  <label className="block text-[13px] font-medium text-foreground mb-2">
+                  <label className="block text-ui-13 font-medium text-foreground mb-2">
                     Commit message
                   </label>
                   <textarea
@@ -240,13 +244,13 @@ export default function GitModal({ open, onClose }: GitModalProps): ReactElement
                     onChange={(e) => setCommitMessage(e.target.value)}
                     placeholder="Leave blank to autogenerate a commit message"
                     rows={3}
-                    className="w-full rounded-lg border border-border bg-secondary/50 px-3 py-2.5 text-[13px] text-foreground placeholder:text-muted-foreground resize-none outline-none focus:border-ring transition-colors"
+                    className="w-full rounded-lg border border-border bg-secondary/50 px-3 py-2.5 text-ui-13 text-foreground placeholder:text-muted-foreground resize-none outline-none focus:border-ring transition-colors"
                   />
                 </div>
 
                 {/* Next steps */}
                 <div className="mb-5">
-                  <span className="block text-[13px] font-medium text-foreground mb-2">
+                  <span className="block text-ui-13 font-medium text-foreground mb-2">
                     Next steps
                   </span>
                   <div className="flex flex-col gap-1">
@@ -256,7 +260,7 @@ export default function GitModal({ open, onClose }: GitModalProps): ReactElement
                         onClick={() => !step.disabled && setNextStep(step.value)}
                         disabled={step.disabled}
                         className={`
-                          flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13px] transition-colors text-left
+                          flex items-center gap-3 px-3 py-2.5 rounded-lg text-ui-13 transition-colors text-left
                           ${step.disabled ? 'opacity-40 cursor-not-allowed' : ''}
                           ${
                             nextStep === step.value
@@ -296,7 +300,7 @@ export default function GitModal({ open, onClose }: GitModalProps): ReactElement
                   <motion.div
                     initial={{ opacity: 0, height: 0 }}
                     animate={{ opacity: 1, height: 'auto' }}
-                    className="mb-4 rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2 text-[12px] text-red-400"
+                    className="mb-4 rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2 text-ui-12 text-red-400"
                   >
                     {error}
                   </motion.div>
@@ -306,7 +310,7 @@ export default function GitModal({ open, onClose }: GitModalProps): ReactElement
                 <button
                   onClick={handleCommit}
                   disabled={committing || status?.filesChanged === 0}
-                  className="w-full py-2.5 rounded-lg bg-primary text-primary-foreground text-[13px] font-medium hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="w-full py-2.5 rounded-lg bg-primary text-primary-foreground text-ui-13 font-medium hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {committing ? 'Working...' : 'Continue'}
                 </button>

@@ -1,12 +1,18 @@
-import { useState, useCallback, type ReactElement } from 'react'
+import { useState, useEffect, useCallback, type ReactElement } from 'react'
 import { Check, ChevronDown, Copy } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { ANIMATION_EASE } from '@/lib/animations'
 import CodeBlock from './code-block'
 import MarkdownRenderer from './markdown-renderer'
-import { useCodexStore, type Message as MessageType, type MessageItem } from '@/lib/store'
+import {
+  useCodexStore,
+  type DirectiveCard,
+  type Message as MessageType,
+  type MessageItem,
+  type OpenDestination
+} from '@/lib/store'
 
-const UI_TEXT_SIZE_CLASS = 'text-[length:var(--app-ui-font-size)]'
+const UI_TEXT_SIZE_CLASS = 'text-[14px]'
 const DISCLOSURE_TRIGGER_CLASS = 'flex items-center gap-2 py-1 text-left'
 const DISCLOSURE_BODY_CLASS = 'ml-[7px] border-l border-border/40 pl-4 py-1'
 
@@ -103,17 +109,189 @@ function getMeaningfulText(...values: Array<string | undefined>): string {
   return ''
 }
 
+function formatItemTypeLabel(item: MessageItem): string {
+  switch (item.type) {
+    case 'directive':
+      return 'Directive'
+    case 'taskStatus':
+      return 'Task'
+    case 'toolCall':
+      return 'Tool Call'
+    case 'mcpToolCall':
+      return 'MCP Tool'
+    case 'dynamicToolCall':
+      return 'Tool Call'
+    case 'collabToolCall':
+      return 'Delegation'
+    case 'webSearch':
+      return 'Web Search'
+    case 'imageView':
+      return 'Image View'
+    case 'contextCompaction':
+      return 'Context Compaction'
+    case 'enteredReviewMode':
+      return 'Review Mode'
+    case 'exitedReviewMode':
+      return 'Review Mode'
+    case 'unknown':
+      return item.rawType ? item.rawType.replace(/_/g, ' ') : 'Unknown'
+    default:
+      return item.type
+  }
+}
+
+function formatTaskStatusLabel(status?: string): string {
+  switch (status) {
+    case 'queued':
+      return 'Queued'
+    case 'running':
+      return 'Running'
+    case 'waiting':
+      return 'Waiting'
+    case 'completed':
+      return 'Completed'
+    case 'failed':
+      return 'Failed'
+    case 'historical':
+      return 'Historical'
+    default:
+      return 'Unknown'
+  }
+}
+
+function openLocalPath(path: string, editor: OpenDestination): void {
+  void window.codex
+    .openFileLink({
+      href: path,
+      editor
+    })
+    .catch((error) => {
+      console.error('Failed to open linked file', error)
+    })
+}
+
+function DirectiveCardItem({
+  directive,
+  fallbackContent
+}: {
+  directive: DirectiveCard
+  fallbackContent: string
+}): ReactElement {
+  const defaultOpenDestination = useCodexStore((state) => state.settings.defaultOpenDestination)
+
+  const fileMeta =
+    directive.filePath && directive.start
+      ? `${directive.filePath}:${directive.start}${directive.end ? `-${directive.end}` : ''}`
+      : directive.filePath
+
+  return (
+    <div className="my-3 rounded-2xl border border-border/70 bg-card/80 px-4 py-3 shadow-[0_10px_24px_rgba(0,0,0,0.06)]">
+      <div className="flex items-start justify-between gap-3">
+        <div className="space-y-1">
+          <div className="text-ui-10 uppercase tracking-[0.18em] text-muted-foreground">
+            {directive.kind === 'inboxItem'
+              ? 'Inbox'
+              : directive.kind === 'codeComment'
+                ? 'Code Comment'
+                : directive.kind === 'automationUpdate'
+                  ? 'Automation'
+                  : directive.kind === 'archive' || directive.kind === 'archiveThread'
+                    ? 'Archive'
+                    : 'Directive'}
+          </div>
+          <div className={`${UI_TEXT_SIZE_CLASS} font-medium text-foreground`}>
+            {directive.title || directive.name || directive.summary || 'Codex directive'}
+          </div>
+        </div>
+        {directive.status && (
+          <span className="rounded-full bg-secondary px-2 py-0.5 text-ui-10 uppercase tracking-[0.14em] text-muted-foreground">
+            {directive.status}
+          </span>
+        )}
+      </div>
+
+      {directive.summary && (
+        <p className={`${UI_TEXT_SIZE_CLASS} mt-2 leading-relaxed text-muted-foreground`}>
+          {directive.summary}
+        </p>
+      )}
+      {directive.body && (
+        <p className={`${UI_TEXT_SIZE_CLASS} mt-2 leading-relaxed text-muted-foreground`}>
+          {directive.body}
+        </p>
+      )}
+      {directive.prompt && (
+        <div className="mt-3 rounded-xl bg-secondary/50 px-3 py-2">
+          <p className="text-ui-10 uppercase tracking-[0.16em] text-muted-foreground">Prompt</p>
+          <p className={`${UI_TEXT_SIZE_CLASS} mt-1 leading-relaxed text-foreground`}>
+            {directive.prompt}
+          </p>
+        </div>
+      )}
+      {(directive.mode || directive.rrule || directive.cwds?.length) && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {directive.mode && (
+            <span className="rounded-full bg-secondary px-2 py-1 text-ui-10 uppercase tracking-[0.14em] text-muted-foreground">
+              {directive.mode}
+            </span>
+          )}
+          {directive.rrule && (
+            <span className="rounded-full bg-secondary px-2 py-1 text-ui-10 uppercase tracking-[0.14em] text-muted-foreground">
+              Scheduled
+            </span>
+          )}
+          {directive.cwds?.map((cwd) => (
+            <span
+              key={cwd}
+              className="rounded-full bg-secondary px-2 py-1 text-ui-10 text-muted-foreground"
+            >
+              {truncateText(cwd, 40)}
+            </span>
+          ))}
+        </div>
+      )}
+      {directive.filePath && (
+        <button
+          type="button"
+          onClick={() => openLocalPath(directive.filePath!, defaultOpenDestination)}
+          className="mt-3 inline-flex items-center gap-2 rounded-full bg-secondary px-3 py-1.5 text-ui-11 text-foreground transition-colors hover:bg-secondary/80"
+          title={fileMeta}
+        >
+          <span className="font-mono">{truncateText(fileMeta || directive.filePath, 80)}</span>
+        </button>
+      )}
+      {!directive.title && !directive.summary && !directive.body && !directive.prompt && (
+        <div className="mt-3">
+          <CodeBlock code={fallbackContent} language="text" />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function TaskStatusItem({ item }: { item: MessageItem }): ReactElement {
+  return (
+    <div className="my-3 rounded-2xl border border-border/60 bg-secondary/35 px-4 py-3">
+      <div className="flex items-center gap-2">
+        <span className="text-ui-10 uppercase tracking-[0.18em] text-muted-foreground">Task</span>
+        <span className="rounded-full bg-background/80 px-2 py-0.5 text-ui-10 uppercase tracking-[0.14em] text-muted-foreground">
+          {formatTaskStatusLabel(item.status)}
+        </span>
+      </div>
+      <div className={`${UI_TEXT_SIZE_CLASS} mt-2 text-foreground`}>
+        {item.summary || item.content || 'Background task update'}
+      </div>
+    </div>
+  )
+}
+
 function CommandExecutionItem({ item }: { item: MessageItem }): ReactElement {
   const status = (item.status || '').toLowerCase()
   const failed = status.includes('fail') || status.includes('error') || status.includes('cancel')
   const finished =
     failed || item.completed || status.includes('complete') || status.includes('success')
   const commandText = item.command || 'command'
-  const summaryPrefix = failed
-    ? 'Background terminal failed with'
-    : finished
-      ? 'Background terminal finished with'
-      : 'Background terminal running'
+  const summaryPrefix = failed ? 'Failed' : finished ? 'Ran' : 'Running'
   const normalizedOutput = normalizeCommandOutput(item.command, item.output)
 
   const [expanded, setExpanded] = useState(false)
@@ -250,7 +428,7 @@ function ItemRenderer({ item }: { item: MessageItem }): ReactElement | null {
               {item.filePath}
             </span>
             {item.changeType && (
-              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              <span className="text-ui-10 uppercase tracking-wider text-muted-foreground">
                 {item.changeType}
               </span>
             )}
@@ -261,6 +439,24 @@ function ItemRenderer({ item }: { item: MessageItem }): ReactElement | null {
 
     case 'reasoning':
       return <ReasoningItem item={item} />
+
+    case 'directive':
+      return (
+        <DirectiveCardItem
+          directive={
+            item.directive || {
+              id: item.id,
+              kind: 'unknown',
+              source: item.content,
+              attributes: {}
+            }
+          }
+          fallbackContent={item.content}
+        />
+      )
+
+    case 'taskStatus':
+      return <TaskStatusItem item={item} />
 
     case 'plan':
       return (
@@ -273,14 +469,16 @@ function ItemRenderer({ item }: { item: MessageItem }): ReactElement | null {
             </span>
             Plan
           </summary>
-          <div
-            className={`${DISCLOSURE_BODY_CLASS} ${UI_TEXT_SIZE_CLASS} text-muted-foreground leading-relaxed whitespace-pre-wrap`}
-          >
-            {item.content}
+          <div className={DISCLOSURE_BODY_CLASS}>
+            <MarkdownRenderer
+              markdown={item.content}
+              className="text-muted-foreground leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+            />
           </div>
         </details>
       )
 
+    case 'toolCall':
     case 'mcpToolCall':
     case 'dynamicToolCall':
     case 'collabToolCall':
@@ -307,7 +505,7 @@ function ItemRenderer({ item }: { item: MessageItem }): ReactElement | null {
       return (
         <div className="my-2 py-2 space-y-1.5">
           <span className={`${UI_TEXT_SIZE_CLASS} uppercase tracking-wide text-muted-foreground`}>
-            {item.type}
+            {formatItemTypeLabel(item)}
           </span>
           <MetadataLine
             label="Tool"
@@ -371,6 +569,7 @@ function ItemRenderer({ item }: { item: MessageItem }): ReactElement | null {
 // --- Tool Call Grouping (rolling output) ---
 
 const GROUPABLE_TYPES = new Set<MessageItem['type']>([
+  'toolCall',
   'commandExecution',
   'fileChange',
   'mcpToolCall',
@@ -427,6 +626,7 @@ function getCompactLabel(item: MessageItem): string {
     }
     case 'webSearch':
       return `Search ${item.query ? truncateText(item.query, 40) : 'web'}`
+    case 'toolCall':
     case 'mcpToolCall':
     case 'dynamicToolCall':
     case 'collabToolCall': {
@@ -460,6 +660,7 @@ function getGroupSummary(items: MessageItem[]): string {
       case 'webSearch':
         cat = 'search'
         break
+      case 'toolCall':
       default:
         cat = 'tool call'
         break
@@ -582,23 +783,62 @@ function ToolCallGroup({ items }: { items: MessageItem[] }): ReactElement {
   )
 }
 
+// ─── Braille double-helix streaming indicator ─────────────────
+const B_EMPTY = 0x2800
+const DOT_MAP = [0, 1, 2, 6, 3, 4, 5, 7]
+
+function dotsToChar(dots: number[]): string {
+  let code = 0
+  for (const d of dots) code |= 1 << d
+  return String.fromCharCode(B_EMPTY + code)
+}
+
+const HELIX_WIDTH = 4
+const PX_W = HELIX_WIDTH * 2
+const PX_H = 4
+
+function doubleHelixFrame(t: number): string {
+  const grid: boolean[][] = Array.from({ length: PX_H }, () => Array(PX_W).fill(false))
+  const p = t * 0.15
+
+  for (let x = 0; x < PX_W; x++) {
+    const y1 = Math.round(1.5 + 1.4 * Math.sin(p + x * 0.5))
+    const y2 = Math.round(1.5 + 1.4 * Math.sin(-p + x * 0.5 + Math.PI))
+    if (y1 >= 0 && y1 < PX_H) grid[y1][x] = true
+    if (y2 >= 0 && y2 < PX_H) grid[y2][x] = true
+    if (Math.abs(y1 - y2) <= 1) {
+      const mid = Math.round((y1 + y2) / 2)
+      if (mid >= 0 && mid < PX_H) grid[mid][x] = true
+    }
+  }
+
+  let result = ''
+  for (let cc = 0; cc < HELIX_WIDTH; cc++) {
+    const dots: number[] = []
+    for (let r = 0; r < 4; r++) {
+      for (let c = 0; c < 2; c++) {
+        if (grid[r][cc * 2 + c]) dots.push(DOT_MAP[r * 2 + c])
+      }
+    }
+    result += dotsToChar(dots)
+  }
+  return result
+}
+
 function StreamingDot({ active }: { active: boolean }): ReactElement | null {
+  const [frame, setFrame] = useState(0)
+
+  useEffect(() => {
+    if (!active) return
+    const id = setInterval(() => setFrame((f) => f + 1), 60)
+    return () => clearInterval(id)
+  }, [active])
+
   if (!active) return null
 
   return (
-    <span className="inline-flex items-center ml-0.5 align-middle">
-      <motion.span
-        className="inline-flex h-2.5 w-2.5 rounded-full bg-foreground/70"
-        animate={{
-          opacity: [0.3, 1, 0.3],
-          scale: [0.8, 1.2, 0.8]
-        }}
-        transition={{
-          duration: 1.2,
-          ease: 'easeInOut',
-          repeat: Infinity
-        }}
-      />
+    <span className="inline-flex items-center ml-1 align-middle font-mono text-[0.85em] leading-none text-foreground/70 select-none">
+      {doubleHelixFrame(frame)}
     </span>
   )
 }
@@ -617,7 +857,7 @@ function AssistantCopyButton({ text }: { text: string }): ReactElement {
       <button
         type="button"
         onClick={handleCopy}
-        className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors px-1.5 py-0.5 rounded-md"
+        className="mt-1 flex items-center gap-1 text-ui-11 text-muted-foreground hover:text-foreground transition-colors px-1.5 py-0.5 rounded-md"
       >
         {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
         {copied ? 'Copied' : 'Copy'}
@@ -640,7 +880,7 @@ function UserCopyButton({ text }: { text: string }): ReactElement {
       <button
         type="button"
         onClick={handleCopy}
-        className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors px-1.5 py-0.5 rounded-md"
+        className="mt-1 flex items-center gap-1 text-ui-11 text-muted-foreground hover:text-foreground transition-colors px-1.5 py-0.5 rounded-md"
       >
         {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
         {copied ? 'Copied' : 'Copy'}
@@ -689,11 +929,11 @@ export default function Message({ message }: MessageProps): ReactElement {
                   title={attachment.path}
                 >
                   <span
-                    className={`inline-flex flex-none items-center justify-center rounded px-1 py-0.5 text-[9px] font-bold tracking-wider leading-none ${getExtensionColor(attachment.name, attachment.kind)}`}
+                    className={`inline-flex flex-none items-center justify-center rounded px-1 py-0.5 text-ui-9 font-bold tracking-wider leading-none ${getExtensionColor(attachment.name, attachment.kind)}`}
                   >
                     {getDisplayExtension(attachment.name, attachment.kind)}
                   </span>
-                  <span className="truncate text-[12px] font-medium text-muted-foreground font-mono">
+                  <span className="truncate text-ui-12 font-medium text-muted-foreground font-mono">
                     {attachment.name}
                   </span>
                 </span>
@@ -709,7 +949,9 @@ export default function Message({ message }: MessageProps): ReactElement {
               segment.kind === 'group' ? (
                 <ToolCallGroup key={segment.items[0].id} items={segment.items} />
               ) : (
-                <ItemRenderer key={segment.item.id} item={segment.item} />
+                <div key={segment.item.id} id={`transcript-item-${segment.item.id}`}>
+                  <ItemRenderer item={segment.item} />
+                </div>
               )
             )
           ) : (

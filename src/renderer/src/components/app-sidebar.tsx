@@ -1,13 +1,35 @@
-import { useMemo, useState, useEffect, useRef, type ReactElement } from 'react'
+import {
+  useMemo,
+  useState,
+  useEffect,
+  useRef,
+  type ReactElement,
+  type ReactNode
+} from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Pin, Trash2, Folder, SquarePen, LayoutGrid } from 'lucide-react'
+import { Pin, Trash2, Folder, ChevronDown, SquarePen, LayoutGrid } from 'lucide-react'
+import { toast } from 'sonner'
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent
+} from '@dnd-kit/core'
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import { ANIMATION_EASE } from '@/lib/animations'
 import { useCodexStore, timeAgo, type Thread } from '@/lib/store'
 import { useResizableSidebar } from '@/lib/use-resizable-sidebar'
+import { getThreadPreview } from '@/lib/thread-preview'
 
 const MAX_VISIBLE_THREADS = 10
 const CHAT_SIDEBAR_MIN_WIDTH = 220
-const CHAT_SIDEBAR_MAX_WIDTH = 440
 
 function getThreadIdFromThreadStartResult(result: unknown): string | null {
   if (typeof result !== 'object' || result === null) return null
@@ -17,15 +39,78 @@ function getThreadIdFromThreadStartResult(result: unknown): string | null {
   return typeof maybeId === 'string' && maybeId ? maybeId : null
 }
 
-function ProjectRowIcon({ iconDataUrl }: { iconDataUrl?: string | null }): ReactElement {
-  if (!iconDataUrl) {
-    return <Folder className="w-3.5 h-3.5 text-sidebar-muted shrink-0" strokeWidth={1.75} />
+function ProjectRowIcon({
+  iconDataUrl,
+  isCollapsed
+}: {
+  iconDataUrl?: string | null
+  isCollapsed?: boolean
+}): ReactElement {
+  return (
+    <div className="relative w-3.5 h-3.5 shrink-0">
+      <AnimatePresence initial={false} mode="wait">
+        {isCollapsed ? (
+          <motion.div
+            key="chevron"
+            initial={{ opacity: 0, rotate: 90 }}
+            animate={{ opacity: 1, rotate: 0 }}
+            exit={{ opacity: 0, rotate: 90 }}
+            transition={{ duration: 0.12, ease: [0.25, 0.1, 0.25, 1] }}
+            className="absolute inset-0"
+          >
+            <ChevronDown
+              className="w-3.5 h-3.5 text-sidebar-muted"
+              strokeWidth={1.75}
+            />
+          </motion.div>
+        ) : (
+          <motion.div
+            key="icon"
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.8 }}
+            transition={{ duration: 0.12, ease: [0.25, 0.1, 0.25, 1] }}
+            className="absolute inset-0"
+          >
+            {iconDataUrl ? (
+              <span className="flex h-3.5 w-3.5 items-center justify-center overflow-hidden rounded-[4px] bg-sidebar-accent/70 ring-1 ring-sidebar-border/60">
+                <img src={iconDataUrl} alt="" className="h-full w-full object-cover" />
+              </span>
+            ) : (
+              <Folder
+                className="w-3.5 h-3.5 text-sidebar-muted"
+                strokeWidth={1.75}
+              />
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+function SortablePinnedThreadRow({
+  id,
+  children
+}: {
+  id: string
+  children: ReactNode
+}): ReactElement {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id
+  })
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+    cursor: isDragging ? 'grabbing' : 'grab'
   }
 
   return (
-    <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center overflow-hidden rounded-[4px] bg-sidebar-accent/70 ring-1 ring-sidebar-border/60">
-      <img src={iconDataUrl} alt="" className="h-full w-full object-cover" />
-    </span>
+    <div ref={setNodeRef} style={style} className="no-drag" {...attributes} {...listeners}>
+      {children}
+    </div>
   )
 }
 
@@ -44,11 +129,20 @@ export default function AppSidebar(): ReactElement {
     createThread,
     updateThreadTitle,
     toggleThreadPinned,
+    reorderPinnedThreads,
     setThreadArchived,
     markThreadUnread,
     cloneThread,
     updateSettings
   } = useCodexStore()
+
+  const [windowWidth, setWindowWidth] = useState(window.innerWidth)
+  useEffect(() => {
+    const onResize = (): void => setWindowWidth(window.innerWidth)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+  const sidebarMaxWidth = Math.max(CHAT_SIDEBAR_MIN_WIDTH, Math.floor(windowWidth / 2))
 
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
   const [showAllGroups, setShowAllGroups] = useState<Record<string, boolean>>({})
@@ -57,6 +151,12 @@ export default function AppSidebar(): ReactElement {
   const projectMenuRef = useRef<HTMLDivElement>(null)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null)
   const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [hoveredThread, setHoveredThread] = useState<{
+    threadId: string
+    preview: string
+    x: number
+    y: number
+  } | null>(null)
   const [contextMenu, setContextMenu] = useState<{
     threadId: string
     x: number
@@ -70,7 +170,7 @@ export default function AppSidebar(): ReactElement {
   const { containerRef, isResizing, handlePointerDown } = useResizableSidebar({
     width: settings.chatSidebarWidth,
     minWidth: CHAT_SIDEBAR_MIN_WIDTH,
-    maxWidth: CHAT_SIDEBAR_MAX_WIDTH,
+    maxWidth: sidebarMaxWidth,
     onWidthChange: (chatSidebarWidth) => updateSettings({ chatSidebarWidth })
   })
 
@@ -127,7 +227,13 @@ export default function AppSidebar(): ReactElement {
   }
 
   const toggleCollapsed = (project: string): void => {
-    setCollapsedGroups((prev) => ({ ...prev, [project]: !prev[project] }))
+    setCollapsedGroups((prev) => {
+      const willCollapse = !prev[project]
+      if (willCollapse) {
+        setShowAllGroups((s) => ({ ...s, [project]: false }))
+      }
+      return { ...prev, [project]: willCollapse }
+    })
   }
 
   const toggleShowAll = (project: string): void => {
@@ -141,7 +247,9 @@ export default function AppSidebar(): ReactElement {
 
   const handleTogglePin = (): void => {
     if (!contextThread) return
+    const wasPinned = contextThread.pinned
     toggleThreadPinned(contextThread.id)
+    toast(wasPinned ? 'Thread unpinned' : 'Thread pinned')
     setContextMenu(null)
   }
 
@@ -156,7 +264,9 @@ export default function AppSidebar(): ReactElement {
 
   const handleToggleArchive = (): void => {
     if (!contextThread) return
-    setThreadArchived(contextThread.id, !contextThread.archived)
+    const wasArchived = contextThread.archived
+    setThreadArchived(contextThread.id, !wasArchived)
+    toast(wasArchived ? 'Thread unarchived' : 'Thread archived')
     setContextMenu(null)
   }
 
@@ -211,7 +321,7 @@ export default function AppSidebar(): ReactElement {
     }
 
     const byNewest = (a: Thread, b: Thread): number => b.createdAt - a.createdAt
-    pinned.sort(byNewest)
+    pinned.sort((a, b) => (a.pinnedOrder ?? a.createdAt) - (b.pinnedOrder ?? b.createdAt))
     Object.values(byProject).forEach((list) => list.sort(byNewest))
     Object.values(byProjectArchived).forEach((list) => list.sort(byNewest))
 
@@ -221,6 +331,22 @@ export default function AppSidebar(): ReactElement {
       archivedGroups: Object.entries(byProjectArchived)
     }
   }, [threads])
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+  )
+
+  const handleDragEnd = (event: DragEndEvent): void => {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    const oldIndex = pinnedThreads.findIndex((t) => t.id === active.id)
+    const newIndex = pinnedThreads.findIndex((t) => t.id === over.id)
+    if (oldIndex === -1 || newIndex === -1) return
+    const reordered = [...pinnedThreads]
+    const [removed] = reordered.splice(oldIndex, 1)
+    reordered.splice(newIndex, 0, removed)
+    reorderPinnedThreads(reordered.map((t) => t.id))
+  }
 
   const projectMetaByName = useMemo(() => {
     const next: Record<string, { path?: string }> = {}
@@ -312,11 +438,26 @@ export default function AppSidebar(): ReactElement {
           setActiveTab('threads')
         }}
         onContextMenu={(e) => handleContextMenu(e, thread.id)}
-        className={`group no-drag relative flex items-center justify-between gap-1 ml-5 pl-4 pr-2 py-[5px] mb-0.5 rounded-md cursor-pointer transition-colors text-[13px] ${
+        className={`group no-drag relative flex items-center justify-between gap-1 ml-5 pl-4 pr-2 py-[5px] mb-0.5 rounded-md cursor-pointer transition-colors text-ui-13 ${
           isActive
             ? 'bg-sidebar-active text-sidebar-foreground'
             : 'text-sidebar-foreground hover:bg-sidebar-hover'
         }`}
+        onMouseEnter={(e) => {
+          const preview = getThreadPreview(thread)
+          if (preview) {
+            const rect = e.currentTarget.getBoundingClientRect()
+            setHoveredThread({
+              threadId: thread.id,
+              preview,
+              x: rect.right + 8,
+              y: rect.top + rect.height / 2
+            })
+          }
+        }}
+        onMouseLeave={() => {
+          setHoveredThread((prev) => (prev?.threadId === thread.id ? null : prev))
+        }}
       >
         <div className="flex items-center gap-1.5 min-w-0 flex-1">
           {!isThreadStreaming && thread.unread && (
@@ -336,12 +477,12 @@ export default function AppSidebar(): ReactElement {
 
         <div className="flex items-center gap-1.5 shrink-0 ml-1">
           {thread.additions != null && thread.deletions != null && (
-            <span className="text-[11px] font-mono">
+            <span className="text-ui-11 font-mono">
               <span className="text-green-600">+{thread.additions}</span>{' '}
               <span className="text-red-500">-{thread.deletions}</span>
             </span>
           )}
-          <span className="text-[11px] text-sidebar-muted tabular-nums">
+          <span className="text-ui-11 text-sidebar-muted tabular-nums">
             {timeAgo(thread.createdAt)}
           </span>
           {confirmingDeleteId === thread.id ? (
@@ -352,7 +493,7 @@ export default function AppSidebar(): ReactElement {
                 setConfirmingDeleteId(null)
                 deleteThread(thread.id)
               }}
-              className="px-1.5 py-0.5 text-[10px] font-medium text-red-500 hover:bg-red-500/10 rounded"
+              className="px-1.5 py-0.5 text-ui-10 font-medium text-red-500 hover:bg-red-500/10 rounded"
             >
               confirm
             </button>
@@ -391,14 +532,14 @@ export default function AppSidebar(): ReactElement {
               <div className="pt-11 px-3 pb-1 drag-region space-y-0.5">
                 <button
                   onClick={() => void handleNewThread()}
-                  className="no-drag flex items-center gap-2.5 px-2.5 py-1.5 text-[13px] text-sidebar-foreground hover:bg-sidebar-hover rounded-md transition-colors w-full"
+                  className="no-drag flex items-center gap-2.5 px-2.5 py-1.5 text-ui-13 text-sidebar-foreground hover:bg-sidebar-hover rounded-md transition-colors w-full"
                 >
                   <SquarePen className="w-4 h-4 text-sidebar-muted" strokeWidth={1.75} />
                   New thread
                 </button>
                 <button
                   onClick={() => setActiveTab('skills')}
-                  className="no-drag flex items-center gap-2.5 px-2.5 py-1.5 text-[13px] text-sidebar-foreground hover:bg-sidebar-hover rounded-md transition-colors w-full"
+                  className="no-drag flex items-center gap-2.5 px-2.5 py-1.5 text-ui-13 text-sidebar-foreground hover:bg-sidebar-hover rounded-md transition-colors w-full"
                 >
                   <LayoutGrid className="w-4 h-4 text-sidebar-muted" strokeWidth={1.75} />
                   Skills
@@ -408,9 +549,9 @@ export default function AppSidebar(): ReactElement {
               {/* Threads section header */}
               <div className="flex items-center justify-between px-5 pt-3 pb-1.5">
                 <div className="flex items-center gap-2 min-w-0">
-                  <span className="text-[12px] font-medium text-sidebar-muted">Threads</span>
+                  <span className="text-ui-12 font-medium text-sidebar-muted">Threads</span>
                   {activeProject && (
-                    <span className="text-[11px] text-sidebar-muted/70 truncate">
+                    <span className="text-ui-11 text-sidebar-muted/70 truncate">
                       {activeProject.name}
                     </span>
                   )}
@@ -423,14 +564,20 @@ export default function AppSidebar(): ReactElement {
                   <div className="mb-1.5">
                     <div className="flex items-center gap-2 px-2.5 pt-1 pb-1 mb-1">
                       <Pin className="w-3 h-3 text-sidebar-muted shrink-0" strokeWidth={1.75} />
-                      <span className="text-[13px] font-medium text-sidebar-foreground">
-                        Pinned
-                      </span>
-                      <span className="text-[11px] text-sidebar-muted ml-auto">
+                      <span className="text-ui-13 font-medium text-sidebar-foreground">Pinned</span>
+                      <span className="text-ui-11 text-sidebar-muted ml-auto">
                         {pinnedThreads.length}
                       </span>
                     </div>
-                    {pinnedThreads.map(renderThreadRow)}
+                    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                      <SortableContext items={pinnedThreads.map((t) => t.id)} strategy={verticalListSortingStrategy}>
+                        {pinnedThreads.map((t) => (
+                          <SortablePinnedThreadRow key={t.id} id={t.id}>
+                            {renderThreadRow(t)}
+                          </SortablePinnedThreadRow>
+                        ))}
+                      </SortableContext>
+                    </DndContext>
                   </div>
                 )}
 
@@ -452,9 +599,9 @@ export default function AppSidebar(): ReactElement {
                         onClick={() => toggleCollapsed(key)}
                       >
                         <div className="shrink-0">
-                          <ProjectRowIcon iconDataUrl={projectIcon} />
+                          <ProjectRowIcon iconDataUrl={projectIcon} isCollapsed={isCollapsed} />
                         </div>
-                        <span className="text-[13px] font-medium text-sidebar-foreground truncate select-none">
+                        <span className="text-ui-13 font-medium text-sidebar-foreground truncate select-none">
                           {project}
                         </span>
                         <button
@@ -487,7 +634,7 @@ export default function AppSidebar(): ReactElement {
                             {hasMore && !isShowingAll && (
                               <button
                                 onClick={() => toggleShowAll(key)}
-                                className="no-drag ml-5 pl-4 pr-2 py-1 text-[12px] text-sidebar-muted hover:text-sidebar-foreground transition-colors"
+                                className="no-drag ml-5 pl-4 pr-2 py-1 text-ui-12 text-sidebar-muted/50 hover:text-sidebar-foreground transition-colors"
                               >
                                 Show {projectThreads.length - MAX_VISIBLE_THREADS} more
                               </button>
@@ -501,7 +648,7 @@ export default function AppSidebar(): ReactElement {
 
                 {archivedGroups.length > 0 && (
                   <div className="mt-2 pt-2 border-t border-sidebar-border">
-                    <div className="px-2.5 pb-1 text-[12px] font-medium text-sidebar-muted">
+                    <div className="px-2.5 pb-1 text-ui-12 font-medium text-sidebar-muted">
                       Archived
                     </div>
                     {archivedGroups.map(([project, projectThreads]) => {
@@ -522,12 +669,12 @@ export default function AppSidebar(): ReactElement {
                             className="no-drag flex items-center gap-2 px-2.5 pt-1 pb-1 mb-1 w-full hover:bg-sidebar-hover rounded-md transition-colors"
                           >
                             <div className="shrink-0">
-                              <ProjectRowIcon iconDataUrl={projectIcon} />
+                              <ProjectRowIcon iconDataUrl={projectIcon} isCollapsed={isCollapsed} />
                             </div>
-                            <span className="text-[13px] font-medium text-sidebar-foreground">
+                            <span className="text-ui-13 font-medium text-sidebar-foreground">
                               {project}
                             </span>
-                            <span className="text-[11px] text-sidebar-muted ml-auto">
+                            <span className="text-ui-11 text-sidebar-muted ml-auto">
                               {projectThreads.length}
                             </span>
                           </button>
@@ -546,7 +693,7 @@ export default function AppSidebar(): ReactElement {
                                 {hasMore && !isShowingAll && (
                                   <button
                                     onClick={() => toggleShowAll(key)}
-                                    className="no-drag ml-5 pl-4 pr-2 py-1 text-[12px] text-sidebar-muted hover:text-sidebar-foreground transition-colors"
+                                    className="no-drag ml-5 pl-4 pr-2 py-1 text-ui-12 text-sidebar-muted/50 hover:text-sidebar-foreground transition-colors"
                                   >
                                     Show {projectThreads.length - MAX_VISIBLE_THREADS} more
                                   </button>
@@ -565,7 +712,7 @@ export default function AppSidebar(): ReactElement {
               <div className="px-3 py-2">
                 <button
                   onClick={() => setActiveTab('settings')}
-                  className="no-drag flex items-center gap-2.5 px-2.5 py-1.5 text-[13px] text-sidebar-foreground hover:bg-sidebar-hover rounded-md transition-colors w-full"
+                  className="no-drag flex items-center gap-2.5 px-2.5 py-1.5 text-ui-13 text-sidebar-foreground hover:bg-sidebar-hover rounded-md transition-colors w-full"
                 >
                   <svg
                     viewBox="0 0 24 24"
@@ -599,7 +746,7 @@ export default function AppSidebar(): ReactElement {
       {contextMenu && (
         <div
           ref={contextMenuRef}
-          className="fixed z-[100] min-w-[200px] bg-popover border border-border rounded-lg shadow-xl py-1 text-[13px]"
+          className="fixed z-[100] min-w-[200px] bg-popover border border-border rounded-lg shadow-xl py-1 text-ui-13"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
           <button
@@ -631,7 +778,10 @@ export default function AppSidebar(): ReactElement {
 
           <button
             onClick={() => {
-              if (contextThread) navigator.clipboard.writeText(contextThread.project || '')
+              if (contextThread) {
+                navigator.clipboard.writeText(contextThread.project || '')
+                toast.success('Copied to clipboard')
+              }
               setContextMenu(null)
             }}
             className="flex w-full px-3 py-1.5 text-popover-foreground hover:bg-secondary transition-colors text-left"
@@ -641,6 +791,7 @@ export default function AppSidebar(): ReactElement {
           <button
             onClick={() => {
               navigator.clipboard.writeText(contextMenu.threadId)
+              toast.success('Copied to clipboard')
               setContextMenu(null)
             }}
             className="flex w-full px-3 py-1.5 text-popover-foreground hover:bg-secondary transition-colors text-left"
@@ -650,6 +801,7 @@ export default function AppSidebar(): ReactElement {
           <button
             onClick={() => {
               navigator.clipboard.writeText(`codex://thread/${contextMenu.threadId}`)
+              toast.success('Copied to clipboard')
               setContextMenu(null)
             }}
             className="flex w-full px-3 py-1.5 text-popover-foreground hover:bg-secondary transition-colors text-left"
@@ -673,6 +825,29 @@ export default function AppSidebar(): ReactElement {
           </button>
         </div>
       )}
+
+      {/* Thread preview tooltip */}
+      <AnimatePresence>
+        {hoveredThread && !contextMenu && (
+          <motion.div
+            key={hoveredThread.threadId}
+            initial={{ opacity: 0, x: -4 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -4 }}
+            transition={{ duration: 0.15 }}
+            className="fixed z-[90] max-w-[280px] px-3 py-2 rounded-lg border border-border bg-popover shadow-lg pointer-events-none"
+            style={{
+              left: hoveredThread.x,
+              top: hoveredThread.y,
+              transform: 'translateY(-50%)'
+            }}
+          >
+            <p className="text-ui-12 text-popover-foreground leading-relaxed break-words whitespace-pre-wrap">
+              {hoveredThread.preview}
+            </p>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </>
   )
 }

@@ -4,20 +4,32 @@ import { fixPath } from './fix-path'
 // when the app is launched from Finder (macOS GUI apps get a minimal PATH).
 fixPath()
 
-import { app, shell, BrowserWindow, ipcMain, dialog, powerSaveBlocker, session } from 'electron'
-import { basename, dirname, extname, join, relative, sep } from 'path'
+import {
+  app,
+  shell,
+  BrowserWindow,
+  ipcMain,
+  dialog,
+  globalShortcut,
+  powerSaveBlocker,
+  session,
+  Menu
+} from 'electron'
+import { basename, dirname, extname, join, relative, resolve, sep } from 'path'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
-import { mkdir, writeFile, readFile, readdir, stat } from 'fs/promises'
+import { mkdir, writeFile, readFile, readdir, stat, rm } from 'fs/promises'
 import { spawn } from 'child_process'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import ignore, { type Ignore } from 'ignore'
 import { CodexServer } from './codex-server'
 import { isAuthenticated, login } from './auth'
 import { transcribeAudio } from './transcribe'
+import { deleteTheme, importTheme, listThemeCatalog } from './theme-library'
 
 const codexServer = new CodexServer()
 let keepAwakeBlockerId: number | null = null
+let registeredFontShortcutWindowId: number | null = null
 
 type FileEditor = 'cursor' | 'zed' | 'vscode' | 'ghostty'
 
@@ -32,6 +44,49 @@ interface ProjectFileEntry {
   name: string
   relativePath: string
   directory: string
+}
+
+const FONT_SIZE_SHORTCUTS = {
+  increase: ['CommandOrControl+=', 'CommandOrControl+Shift+=', 'CommandOrControl+numadd'],
+  decrease: ['CommandOrControl+-', 'CommandOrControl+numsub'],
+  reset: ['CommandOrControl+0']
+} as const
+
+function unregisterFontSizeShortcuts(): void {
+  for (const accelerator of [
+    ...FONT_SIZE_SHORTCUTS.increase,
+    ...FONT_SIZE_SHORTCUTS.decrease,
+    ...FONT_SIZE_SHORTCUTS.reset
+  ]) {
+    if (globalShortcut.isRegistered(accelerator)) {
+      globalShortcut.unregister(accelerator)
+    }
+  }
+  registeredFontShortcutWindowId = null
+}
+
+function registerFontSizeShortcuts(win: BrowserWindow): void {
+  if (win.isDestroyed()) return
+  if (registeredFontShortcutWindowId === win.id) return
+
+  unregisterFontSizeShortcuts()
+
+  const sendFontSizeShortcut = (delta: number): void => {
+    if (win.isDestroyed() || !win.isFocused()) return
+    win.webContents.send('codex:font-size-shortcut', { delta })
+  }
+
+  for (const accelerator of FONT_SIZE_SHORTCUTS.increase) {
+    globalShortcut.register(accelerator, () => sendFontSizeShortcut(1))
+  }
+  for (const accelerator of FONT_SIZE_SHORTCUTS.decrease) {
+    globalShortcut.register(accelerator, () => sendFontSizeShortcut(-1))
+  }
+  for (const accelerator of FONT_SIZE_SHORTCUTS.reset) {
+    globalShortcut.register(accelerator, () => sendFontSizeShortcut(0))
+  }
+
+  registeredFontShortcutWindowId = win.id
 }
 
 interface CodexConfigLayer {
@@ -57,6 +112,24 @@ interface SkillsConfigWriteParams {
 interface SkillsConfigEntry {
   path: string
   enabled: boolean
+}
+
+interface StoredPlanSummary {
+  path: string
+  name: string
+  title: string
+  preview: string
+  updatedAt: number
+  size: number
+}
+
+interface StoredPlanDocument extends StoredPlanSummary {
+  content: string
+}
+
+interface SavePlanDocumentParams {
+  title?: string
+  content: string
 }
 
 const MAX_PROJECT_FILE_REFERENCES = 10000
@@ -92,6 +165,8 @@ const PROJECT_ICON_MIME_TYPES: Record<string, string> = {
   '.png': 'image/png',
   '.svg': 'image/svg+xml'
 }
+const ROSS_PLANS_DIR = join(homedir(), '.ross', 'plans')
+const APP_STATE_FILENAME = 'app-state.json'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -213,6 +288,172 @@ async function openBundledDocument(relativePath: string): Promise<void> {
   await mkdir(tempDir, { recursive: true })
   await writeFile(tempPath, content, 'utf8')
   await openPathInDefaultApp(tempPath)
+}
+
+function getAppStatePath(): string {
+  return join(app.getPath('userData'), APP_STATE_FILENAME)
+}
+
+async function loadStoredAppState(): Promise<unknown | null> {
+  try {
+    const rawState = await readFile(getAppStatePath(), 'utf8')
+    return JSON.parse(rawState) as unknown
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      return null
+    }
+
+    console.error('Failed to load stored app state:', error)
+    return null
+  }
+}
+
+async function saveStoredAppState(state: unknown): Promise<boolean> {
+  try {
+    const filePath = getAppStatePath()
+    await mkdir(dirname(filePath), { recursive: true })
+    await writeFile(filePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+    return true
+  } catch (error) {
+    console.error('Failed to save app state:', error)
+    return false
+  }
+}
+
+async function clearStoredAppState(): Promise<boolean> {
+  try {
+    await rm(getAppStatePath(), { force: true })
+    return true
+  } catch (error) {
+    console.error('Failed to clear app state:', error)
+    return false
+  }
+}
+
+async function ensurePlansDirectory(): Promise<string> {
+  await mkdir(ROSS_PLANS_DIR, { recursive: true })
+  return ROSS_PLANS_DIR
+}
+
+function resolvePlanPath(planPath: string): string {
+  const resolvedPath = resolve(planPath)
+  const relativePath = relative(resolve(ROSS_PLANS_DIR), resolvedPath)
+
+  if (
+    relativePath === '' ||
+    relativePath.startsWith('..') ||
+    relativePath.split(sep).includes('..') ||
+    extname(resolvedPath).toLowerCase() !== '.md'
+  ) {
+    throw new Error('Invalid plan path')
+  }
+
+  return resolvedPath
+}
+
+function slugifyPlanTitle(title: string): string {
+  return title
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+}
+
+function formatPlanFilenameDate(date = new Date()): string {
+  const year = date.getFullYear()
+  const month = `${date.getMonth() + 1}`.padStart(2, '0')
+  const day = `${date.getDate()}`.padStart(2, '0')
+  const hours = `${date.getHours()}`.padStart(2, '0')
+  const minutes = `${date.getMinutes()}`.padStart(2, '0')
+  const seconds = `${date.getSeconds()}`.padStart(2, '0')
+
+  return `${year}${month}${day}-${hours}${minutes}${seconds}`
+}
+
+function getPlanTitleFromMarkdown(markdown: string, fallbackName: string): string {
+  const match = markdown.match(/^#\s+(.+)$/m)
+  const candidate = match?.[1]?.trim()
+
+  if (candidate) return candidate
+  return fallbackName.replace(/\.md$/i, '').replace(/[-_]+/g, ' ').trim() || 'Untitled plan'
+}
+
+function getPlanPreview(markdown: string): string {
+  return markdown
+    .replace(/^---[\s\S]*?---\s*/m, '')
+    .split('\n')
+    .map((line) => line.replace(/^#+\s*/, '').trim())
+    .filter((line) => line.length > 0)
+    .slice(1)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .slice(0, 180)
+}
+
+async function readStoredPlanDocument(planPath: string): Promise<StoredPlanDocument> {
+  const resolvedPath = resolvePlanPath(planPath)
+  const [content, stats] = await Promise.all([readFile(resolvedPath, 'utf8'), stat(resolvedPath)])
+  const name = basename(resolvedPath)
+
+  return {
+    path: resolvedPath,
+    name,
+    title: getPlanTitleFromMarkdown(content, name),
+    preview: getPlanPreview(content),
+    updatedAt: stats.mtimeMs,
+    size: stats.size,
+    content
+  }
+}
+
+async function listStoredPlans(): Promise<{ directory: string; plans: StoredPlanSummary[] }> {
+  const directory = await ensurePlansDirectory()
+  const entries = await readdir(directory, { withFileTypes: true })
+  const plans = await Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && extname(entry.name).toLowerCase() === '.md')
+      .map(async (entry) => {
+        try {
+          const document = await readStoredPlanDocument(join(directory, entry.name))
+          return {
+            path: document.path,
+            name: document.name,
+            title: document.title,
+            preview: document.preview,
+            updatedAt: document.updatedAt,
+            size: document.size
+          }
+        } catch (error) {
+          console.error(`Failed to read plan document ${entry.name}:`, error)
+          return null
+        }
+      })
+  )
+
+  return {
+    directory,
+    plans: plans
+      .filter((plan): plan is StoredPlanSummary => Boolean(plan))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+  }
+}
+
+async function saveStoredPlanDocument(params: SavePlanDocumentParams): Promise<StoredPlanDocument> {
+  const content = typeof params.content === 'string' ? params.content.trim() : ''
+  if (!content) {
+    throw new Error('Plan content is required')
+  }
+
+  const directory = await ensurePlansDirectory()
+  const title =
+    typeof params.title === 'string' && params.title.trim() ? params.title.trim() : 'Plan'
+  const slug = slugifyPlanTitle(title) || 'plan'
+  const filename = `${formatPlanFilenameDate()}-${slug}-${randomUUID().slice(0, 8)}.md`
+  const filePath = join(directory, filename)
+
+  await writeFile(filePath, `${content}\n`, 'utf8')
+  return readStoredPlanDocument(filePath)
 }
 
 function buildGotoTarget(path: string, line?: number, column?: number): string {
@@ -565,6 +806,113 @@ app.whenReady().then(() => {
 
   const win = createWindow()
   codexServer.setWindow(win)
+  const sendFontSizeShortcut = (delta: number): void => {
+    if (win.isDestroyed()) return
+    win.webContents.send('codex:font-size-shortcut', { delta })
+  }
+  win.on('focus', () => registerFontSizeShortcuts(win))
+  win.on('blur', () => {
+    if (registeredFontShortcutWindowId === win.id) {
+      unregisterFontSizeShortcuts()
+    }
+  })
+  win.on('closed', () => {
+    if (registeredFontShortcutWindowId === win.id) {
+      unregisterFontSizeShortcuts()
+    }
+  })
+  if (win.isFocused()) {
+    registerFontSizeShortcuts(win)
+  }
+
+  // macOS application menu
+  const template: Electron.MenuItemConstructorOptions[] = [
+    ...(process.platform === 'darwin'
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: 'about' as const },
+              { type: 'separator' as const },
+              { role: 'services' as const },
+              { type: 'separator' as const },
+              { role: 'hide' as const },
+              { role: 'hideOthers' as const },
+              { role: 'unhide' as const },
+              { type: 'separator' as const },
+              { role: 'quit' as const }
+            ]
+          }
+        ]
+      : []),
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'Open Project',
+          accelerator: 'CmdOrCtrl+O',
+          click: async (): Promise<void> => {
+            const result = await dialog.showOpenDialog(win, {
+              properties: ['openDirectory'],
+              title: 'Open Project'
+            })
+            if (result.canceled || result.filePaths.length === 0) return
+            const fullPath = result.filePaths[0]
+            const name = fullPath.split('/').pop() || fullPath
+            win.webContents.send('codex:open-project-result', { path: fullPath, name })
+          }
+        },
+        { type: 'separator' },
+        ...(process.platform === 'darwin'
+          ? [{ role: 'close' as const }]
+          : [{ role: 'quit' as const }])
+      ]
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' }
+      ]
+    },
+    {
+      label: 'Window',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        ...(process.platform === 'darwin'
+          ? [{ type: 'separator' as const }, { role: 'front' as const }]
+          : [{ role: 'close' as const }])
+      ]
+    },
+    {
+      label: 'View',
+      submenu: [
+        {
+          label: 'Increase Font Size',
+          accelerator: 'CmdOrCtrl+Plus',
+          click: () => sendFontSizeShortcut(1)
+        },
+        {
+          label: 'Decrease Font Size',
+          accelerator: 'CmdOrCtrl+-',
+          click: () => sendFontSizeShortcut(-1)
+        },
+        {
+          label: 'Reset Font Size',
+          accelerator: 'CmdOrCtrl+0',
+          click: () => sendFontSizeShortcut(0)
+        }
+      ]
+    }
+  ]
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 
   // IPC handlers
   ipcMain.handle('codex:is-authenticated', () => isAuthenticated())
@@ -728,6 +1076,18 @@ app.whenReady().then(() => {
     }))
   })
 
+  ipcMain.handle('codex:list-themes', async () => listThemeCatalog())
+
+  ipcMain.handle('codex:import-theme', async () => importTheme(win))
+
+  ipcMain.handle('codex:delete-theme', async (_, themeId: string) => {
+    if (typeof themeId !== 'string') {
+      throw new Error('Invalid theme id')
+    }
+
+    return deleteTheme(themeId)
+  })
+
   ipcMain.handle('codex:open-path', async (_, path: string) => {
     if (typeof path !== 'string' || !path.startsWith('/')) {
       throw new Error('Invalid path')
@@ -742,6 +1102,24 @@ app.whenReady().then(() => {
     }
 
     await openBundledDocument(relativePath)
+  })
+
+  ipcMain.handle('codex:load-app-state', async () => loadStoredAppState())
+
+  ipcMain.handle('codex:save-app-state', async (_, state: unknown) => saveStoredAppState(state))
+
+  ipcMain.handle('codex:clear-app-state', async () => clearStoredAppState())
+
+  ipcMain.handle('codex:plans-list', async () => listStoredPlans())
+
+  ipcMain.handle('codex:plan-read', async (_, planPath: string) => readStoredPlanDocument(planPath))
+
+  ipcMain.handle('codex:plan-save', async (_, params) => {
+    const request = isRecord(params) ? params : {}
+    return saveStoredPlanDocument({
+      title: typeof request.title === 'string' ? request.title : undefined,
+      content: typeof request.content === 'string' ? request.content : ''
+    })
   })
 
   ipcMain.handle(
@@ -1036,6 +1414,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  unregisterFontSizeShortcuts()
   if (keepAwakeBlockerId != null && powerSaveBlocker.isStarted(keepAwakeBlockerId)) {
     powerSaveBlocker.stop(keepAwakeBlockerId)
     keepAwakeBlockerId = null

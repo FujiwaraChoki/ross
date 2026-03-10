@@ -1,4 +1,5 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webFrame } from 'electron'
+import type { ThemeCatalogEntry } from '../shared/theme'
 
 export type CodexEvent = {
   method: string
@@ -8,6 +9,7 @@ export type CodexEvent = {
 
 export type CodexApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never'
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
+export type CodexCollaborationModeKind = 'default' | 'plan'
 
 export interface CodexConfigReadResponse {
   config?: {
@@ -22,6 +24,23 @@ export interface CodexConfigReadResponse {
     } | null
     version?: string | null
   }> | null
+}
+
+export interface StoredPlanSummary {
+  path: string
+  name: string
+  title: string
+  preview: string
+  updatedAt: number
+  size: number
+}
+
+export interface StoredPlanDocument extends StoredPlanSummary {
+  content: string
+}
+
+export interface ThemeCatalogResponse {
+  themes: ThemeCatalogEntry[]
 }
 
 const codexApi = {
@@ -80,9 +99,24 @@ const codexApi = {
     ipcRenderer.invoke('codex:get-project-icon', projectPath),
   openAttachments: (): Promise<{ path: string; name: string }[] | null> =>
     ipcRenderer.invoke('codex:open-attachments'),
+  listThemes: (): Promise<ThemeCatalogResponse> => ipcRenderer.invoke('codex:list-themes'),
+  importTheme: (): Promise<{ imported: ThemeCatalogEntry; themes: ThemeCatalogEntry[] } | null> =>
+    ipcRenderer.invoke('codex:import-theme'),
+  deleteTheme: (themeId: string): Promise<ThemeCatalogResponse> =>
+    ipcRenderer.invoke('codex:delete-theme', themeId),
   openPath: (path: string): Promise<void> => ipcRenderer.invoke('codex:open-path', path),
   openBundledDocument: (relativePath: string): Promise<void> =>
     ipcRenderer.invoke('codex:open-bundled-document', relativePath),
+  loadAppState: (): Promise<unknown | null> => ipcRenderer.invoke('codex:load-app-state'),
+  saveAppState: (state: unknown): Promise<boolean> =>
+    ipcRenderer.invoke('codex:save-app-state', state),
+  clearAppState: (): Promise<boolean> => ipcRenderer.invoke('codex:clear-app-state'),
+  listPlans: (): Promise<{ directory: string; plans: StoredPlanSummary[] }> =>
+    ipcRenderer.invoke('codex:plans-list'),
+  readPlan: (path: string): Promise<StoredPlanDocument> =>
+    ipcRenderer.invoke('codex:plan-read', path),
+  savePlan: (params: { title?: string; content: string }): Promise<StoredPlanDocument> =>
+    ipcRenderer.invoke('codex:plan-save', params),
   stageAttachment: (params: {
     name?: string
     mimeType?: string
@@ -132,6 +166,20 @@ const codexApi = {
     const handler = (_: Electron.IpcRendererEvent, data: CodexEvent): void => callback(data)
     ipcRenderer.on('codex:event', handler)
     return () => ipcRenderer.removeListener('codex:event', handler)
+  },
+  onOpenProjectResult: (callback: (data: { path: string; name: string }) => void): (() => void) => {
+    const handler = (_: Electron.IpcRendererEvent, data: { path: string; name: string }): void =>
+      callback(data)
+    ipcRenderer.on('codex:open-project-result', handler)
+    return () => ipcRenderer.removeListener('codex:open-project-result', handler)
+  },
+  onFontSizeShortcut: (callback: (data: { delta: number }) => void): (() => void) => {
+    const handler = (_: Electron.IpcRendererEvent, data: { delta: number }): void => callback(data)
+    ipcRenderer.on('codex:font-size-shortcut', handler)
+    return () => ipcRenderer.removeListener('codex:font-size-shortcut', handler)
+  },
+  setZoomFactor: (factor: number): void => {
+    webFrame.setZoomFactor(factor)
   }
 }
 

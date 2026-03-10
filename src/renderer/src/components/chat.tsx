@@ -9,11 +9,18 @@ import {
   type DragEvent
 } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { FileCode2, FileImage, FileText, X } from 'lucide-react'
+import { FileCode2, FileImage, FileText, ListChecks, X } from 'lucide-react'
 import { ANIMATION_EASE } from '@/lib/animations'
-import { useCodexStore, type Message as MessageType, type MessageAttachment } from '@/lib/store'
+import {
+  useCodexStore,
+  type AvailableModelReasoningEffort,
+  type Message as MessageType,
+  type MessageAttachment,
+  type ReasoningEffort
+} from '@/lib/store'
 import { deriveThreadTitleFromInput } from '@/lib/thread-titles'
 import Message from './message'
+import TaskRail from './task-rail'
 
 const SUGGESTIONS = [
   { emoji: '🎮', text: 'Build a classic Snake game in this repo.' },
@@ -24,16 +31,38 @@ const SUGGESTIONS = [
 interface ModelOption {
   id: string
   name: string
+  defaultReasoningEffort: ReasoningEffort | null
+  supportedReasoningEfforts: AvailableModelReasoningEffort[]
 }
 
+const FALLBACK_REASONING_EFFORTS: AvailableModelReasoningEffort[] = [
+  { reasoningEffort: 'low', description: 'Fast responses with lighter reasoning' },
+  {
+    reasoningEffort: 'medium',
+    description: 'Balances speed and reasoning depth for everyday tasks'
+  },
+  { reasoningEffort: 'high', description: 'Greater reasoning depth for complex problems' }
+]
+
 const FALLBACK_MODELS: ModelOption[] = [
-  { id: 'gpt-5.3-codex', name: 'GPT-5.3-Codex' },
-  { id: 'gpt-5.4', name: 'GPT-5.4' },
-  { id: 'gpt-5.3-codex-spark', name: 'GPT-5.3-Codex-Spark' },
-  { id: 'gpt-5.2-codex', name: 'GPT-5.2-Codex' },
-  { id: 'gpt-5.1-codex-max', name: 'GPT-5.1-Codex-Max' },
-  { id: 'gpt-5.2', name: 'GPT-5.2' },
-  { id: 'gpt-5.1-codex-mini', name: 'GPT-5.1-Codex-Mini' }
+  {
+    id: 'gpt-5.3-codex',
+    name: 'GPT-5.3-Codex',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: FALLBACK_REASONING_EFFORTS
+  },
+  {
+    id: 'gpt-5.4',
+    name: 'GPT-5.4',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: FALLBACK_REASONING_EFFORTS
+  },
+  {
+    id: 'gpt-5.3-codex-spark',
+    name: 'GPT-5.3-Codex-Spark',
+    defaultReasoningEffort: 'medium',
+    supportedReasoningEfforts: FALLBACK_REASONING_EFFORTS
+  }
 ]
 
 const EMPTY_MESSAGES: MessageType[] = []
@@ -75,6 +104,7 @@ type QueuedFollowUp = {
   userAttachments: MessageAttachment[]
   inputItems: TurnInputItem[]
   projectCwd?: string
+  planModeEnabled: boolean
 }
 
 type ProjectFileEntry = {
@@ -121,6 +151,15 @@ function formatModelId(id: string): string {
       return part.charAt(0).toUpperCase() + part.slice(1)
     })
     .join('-')
+}
+
+function formatReasoningEffortLabel(effort: ReasoningEffort): string {
+  switch (effort) {
+    case 'xhigh':
+      return 'X-High'
+    default:
+      return effort.charAt(0).toUpperCase() + effort.slice(1)
+  }
 }
 
 function formatRecordingTime(seconds: number): string {
@@ -264,6 +303,39 @@ function getTurnIdFromTurnStartResult(result: unknown): string | null {
   return typeof maybeId === 'string' && maybeId ? maybeId : null
 }
 
+function getTurnModeKindFromTurnStartResult(result: unknown): 'default' | 'plan' | null {
+  if (typeof result !== 'object' || result === null) return null
+
+  const topLevelMode = (
+    result as { collaborationModeKind?: unknown; collaboration_mode_kind?: unknown }
+  ).collaborationModeKind
+  if (topLevelMode === 'default' || topLevelMode === 'plan') {
+    return topLevelMode
+  }
+
+  const topLevelSnakeMode = (
+    result as { collaborationModeKind?: unknown; collaboration_mode_kind?: unknown }
+  ).collaboration_mode_kind
+  if (topLevelSnakeMode === 'default' || topLevelSnakeMode === 'plan') {
+    return topLevelSnakeMode
+  }
+
+  const maybeTurn = (result as { turn?: unknown }).turn
+  if (typeof maybeTurn !== 'object' || maybeTurn === null) return null
+
+  const nestedMode = (
+    maybeTurn as { collaborationModeKind?: unknown; collaboration_mode_kind?: unknown }
+  ).collaborationModeKind
+  if (nestedMode === 'default' || nestedMode === 'plan') {
+    return nestedMode
+  }
+
+  const nestedSnakeMode = (
+    maybeTurn as { collaborationModeKind?: unknown; collaboration_mode_kind?: unknown }
+  ).collaboration_mode_kind
+  return nestedSnakeMode === 'default' || nestedSnakeMode === 'plan' ? nestedSnakeMode : null
+}
+
 function getEffectiveFollowUpBehavior(
   behavior: 'queue' | 'steer',
   useOppositeBehavior: boolean
@@ -288,7 +360,7 @@ export default function Chat(): ReactElement {
   const [input, setInput] = useState('')
   const [pendingAttachments, setPendingAttachments] = useState<ComposerAttachment[]>([])
   const [isDragOverComposer, setIsDragOverComposer] = useState(false)
-  const [models, setModels] = useState<ModelOption[]>(FALLBACK_MODELS)
+  const storeModels = useCodexStore((s) => s.availableModels)
   const [isRecording, setIsRecording] = useState(false)
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [recordingTime, setRecordingTime] = useState(0)
@@ -328,33 +400,31 @@ export default function Chat(): ReactElement {
     isStreaming,
     model,
     setModel,
+    reasoningEffort,
+    setReasoningEffort,
     autonomyLevel,
     setAutonomyLevel,
+    planModeEnabled,
+    setPlanModeEnabled,
     activeProject,
     recentProjects,
     setActiveProject,
     settings
   } = useCodexStore()
 
-  useEffect(() => {
-    window.codex
-      .modelList()
-      .then((result) => {
-        const res = result as {
-          data?: { id: string; displayName?: string; name?: string; hidden?: boolean }[]
-        }
-        const list = res?.data?.filter((m) => !m.hidden)
-        if (list?.length) {
-          setModels(
-            list.map((m) => {
-              const display = m.displayName || m.id
-              return { id: m.id, name: display === m.id ? formatModelId(m.id) : display }
-            })
-          )
-        }
-      })
-      .catch(() => {})
-  }, [])
+  const models: ModelOption[] =
+    storeModels.length > 0
+      ? storeModels.map((m) => ({
+          id: m.id,
+          name: m.name === m.id ? formatModelId(m.id) : m.name,
+          defaultReasoningEffort: m.defaultReasoningEffort,
+          supportedReasoningEfforts: m.supportedReasoningEfforts
+        }))
+      : FALLBACK_MODELS
+  const selectedModel = models.find((entry) => entry.id === model) || models[0] || null
+  const reasoningEffortOptions = selectedModel?.supportedReasoningEfforts.length
+    ? selectedModel.supportedReasoningEfforts
+    : FALLBACK_REASONING_EFFORTS
 
   const activeThread = threads.find((t) => t.id === activeThreadId)
   const matchingProject =
@@ -642,7 +712,7 @@ export default function Chat(): ReactElement {
   )
 
   const sendPreparedTurn = useCallback(
-    async ({ threadId, inputItems, projectCwd }: QueuedFollowUp) => {
+    async ({ threadId, inputItems, projectCwd, planModeEnabled }: QueuedFollowUp) => {
       const store = useCodexStore.getState()
       const assistantId = crypto.randomUUID()
       const assistantMessage: MessageType = {
@@ -658,18 +728,34 @@ export default function Chat(): ReactElement {
       store.addMessage(threadId, assistantMessage)
       store.setStreamingThread(threadId)
       store.setIsStreaming(true)
+      store.setActiveTurn(threadId, null, planModeEnabled ? 'plan' : 'default')
 
       try {
         const result = await window.codex.turnStart({
           threadId,
           model: store.model,
+          effort: store.reasoningEffort,
           cwd: projectCwd,
           summary: 'detailed',
+          collaborationMode: planModeEnabled
+            ? {
+                mode: 'plan',
+                settings: {
+                  model: store.model,
+                  reasoning_effort: store.reasoningEffort,
+                  developer_instructions: null
+                }
+              }
+            : undefined,
           input: inputItems
         })
         const turnId = getTurnIdFromTurnStartResult(result)
         if (turnId && useCodexStore.getState().isStreaming) {
-          store.setActiveTurn(threadId, turnId)
+          store.setActiveTurn(
+            threadId,
+            turnId,
+            getTurnModeKindFromTurnStartResult(result) || (planModeEnabled ? 'plan' : 'default')
+          )
         }
       } catch (e) {
         console.error('Failed to start turn:', e)
@@ -745,7 +831,8 @@ export default function Chat(): ReactElement {
         text,
         userAttachments,
         inputItems,
-        projectCwd
+        projectCwd,
+        planModeEnabled
       }
 
       addLocalUserMessage(threadId, text, userAttachments)
@@ -799,6 +886,7 @@ export default function Chat(): ReactElement {
       isTranscribing,
       releaseAttachmentPreviews,
       sendPreparedTurn,
+      planModeEnabled,
       settings.followUpBehavior
     ]
   )
@@ -1135,7 +1223,7 @@ export default function Chat(): ReactElement {
                   className="overflow-hidden rounded-[24px] border border-border bg-popover/96 text-popover-foreground shadow-[0_24px_72px_-32px_rgba(0,0,0,0.45)] backdrop-blur-xl"
                 >
                   <div className="px-4 pt-3 pb-1.5">
-                    <p className="text-[10px] font-medium tracking-[0.02em] text-muted-foreground">
+                    <p className="text-ui-10 font-medium tracking-[0.02em] text-muted-foreground">
                       {currentProjectName
                         ? `Showing files from ${currentProjectName}`
                         : 'Showing files from the current workspace'}
@@ -1144,15 +1232,15 @@ export default function Chat(): ReactElement {
 
                   <div className="max-h-[360px] overflow-y-auto px-2.5 pb-2.5">
                     {projectFilesLoading ? (
-                      <div className="px-2 py-6 text-center text-[12px] text-muted-foreground">
+                      <div className="px-2 py-6 text-center text-ui-12 text-muted-foreground">
                         Loading project files...
                       </div>
                     ) : projectFilesError ? (
-                      <div className="px-2 py-6 text-center text-[12px] text-muted-foreground">
+                      <div className="px-2 py-6 text-center text-ui-12 text-muted-foreground">
                         {projectFilesError}
                       </div>
                     ) : visibleProjectFiles.length === 0 ? (
-                      <div className="px-2 py-6 text-center text-[12px] text-muted-foreground">
+                      <div className="px-2 py-6 text-center text-ui-12 text-muted-foreground">
                         No matching files found.
                       </div>
                     ) : (
@@ -1175,10 +1263,10 @@ export default function Chat(): ReactElement {
                                 strokeWidth={1.8}
                               />
                               <span className="min-w-0 flex flex-1 items-baseline gap-3 overflow-hidden">
-                                <span className="truncate text-[12px] font-semibold tracking-[-0.01em] text-popover-foreground">
+                                <span className="truncate text-ui-12 font-semibold tracking-[-0.01em] text-popover-foreground">
                                   {file.name}
                                 </span>
-                                <span className="truncate text-[12px] text-muted-foreground">
+                                <span className="truncate text-ui-12 text-muted-foreground">
                                   {file.directory}
                                 </span>
                               </span>
@@ -1190,7 +1278,7 @@ export default function Chat(): ReactElement {
                   </div>
 
                   {projectFilesTruncated && !projectFilesLoading && !projectFilesError && (
-                    <div className="border-t border-border px-4 py-2.5 text-[10px] text-muted-foreground">
+                    <div className="border-t border-border px-4 py-2.5 text-ui-10 text-muted-foreground">
                       Showing the first 10,000 files to keep the picker responsive.
                     </div>
                   )}
@@ -1215,12 +1303,12 @@ export default function Chat(): ReactElement {
                       />
                     ) : (
                       <span
-                        className={`inline-flex flex-none items-center justify-center rounded px-1 py-0.5 text-[9px] font-bold tracking-wider leading-none ${getComposerExtensionColor(attachment.name, attachment.kind)}`}
+                        className={`inline-flex flex-none items-center justify-center rounded px-1 py-0.5 text-ui-9 font-bold tracking-wider leading-none ${getComposerExtensionColor(attachment.name, attachment.kind)}`}
                       >
                         {getComposerDisplayExtension(attachment.name, attachment.kind)}
                       </span>
                     )}
-                    <span className="truncate text-[12px] font-medium text-foreground/80 font-mono">
+                    <span className="truncate text-ui-12 font-medium text-foreground/80 font-mono">
                       {attachment.name}
                     </span>
                     <button
@@ -1251,7 +1339,7 @@ export default function Chat(): ReactElement {
                 onKeyDown={handleKeyDown}
                 placeholder="Ask Codex anything, upload, paste, or drop files"
                 rows={3}
-                className="w-full resize-none px-3 pt-3 pb-9 min-h-[100px] text-[14px] bg-transparent focus:outline-none placeholder:text-muted-foreground/50 placeholder:select-none"
+                className="w-full resize-none px-3 pt-3 pb-9 min-h-[100px] text-ui-14 bg-transparent focus:outline-none placeholder:text-muted-foreground/50 placeholder:select-none"
               />
             )}
 
@@ -1265,7 +1353,7 @@ export default function Chat(): ReactElement {
                   transition={{ duration: 0.15 }}
                   className="w-full px-3 pt-3 pb-9 min-h-[100px]"
                 >
-                  <p className="text-[14px] text-muted-foreground/50">
+                  <p className="text-ui-14 text-muted-foreground/50">
                     {isTranscribing ? 'Transcribing...' : 'Listening...'}
                   </p>
                 </motion.div>
@@ -1303,7 +1391,8 @@ export default function Chat(): ReactElement {
                     <select
                       value={model}
                       onChange={(e) => setModel(e.target.value)}
-                      className="select-tight select-none appearance-none bg-transparent text-[12px] font-medium text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded-md hover:bg-secondary transition-colors cursor-pointer focus:outline-none"
+                      title="Choose model"
+                      className="select-tight select-none appearance-none bg-transparent text-ui-12 font-medium text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded-md hover:bg-secondary transition-colors cursor-pointer focus:outline-none"
                     >
                       {models.map((m) => (
                         <option key={m.id} value={m.id}>
@@ -1313,14 +1402,48 @@ export default function Chat(): ReactElement {
                     </select>
 
                     <select
+                      value={reasoningEffort ?? 'default'}
+                      onChange={(e) =>
+                        setReasoningEffort(
+                          e.target.value === 'default' ? null : (e.target.value as ReasoningEffort)
+                        )
+                      }
+                      title="Adjust reasoning effort"
+                      className="select-tight select-none appearance-none bg-transparent text-ui-12 font-medium text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded-md hover:bg-secondary transition-colors cursor-pointer focus:outline-none"
+                    >
+                      <option value="default">Default</option>
+                      {reasoningEffortOptions.map((option) => (
+                        <option key={option.reasoningEffort} value={option.reasoningEffort}>
+                          {formatReasoningEffortLabel(option.reasoningEffort)}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
                       value={autonomyLevel}
                       onChange={(e) => setAutonomyLevel(e.target.value)}
-                      className="select-tight select-none appearance-none bg-transparent text-[12px] font-medium text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded-md hover:bg-secondary transition-colors cursor-pointer focus:outline-none"
+                      title="Choose autonomy level"
+                      className="select-tight select-none appearance-none bg-transparent text-ui-12 font-medium text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded-md hover:bg-secondary transition-colors cursor-pointer focus:outline-none"
                     >
                       <option value="Hand off">Hand off</option>
                       <option value="Suggest">Suggest</option>
                       <option value="Auto">Auto</option>
                     </select>
+
+                    <button
+                      type="button"
+                      onClick={() => setPlanModeEnabled(!planModeEnabled)}
+                      aria-label="Toggle plan mode"
+                      aria-pressed={planModeEnabled}
+                      className={`flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-ui-12 font-medium transition-colors ${
+                        planModeEnabled
+                          ? 'bg-secondary text-foreground'
+                          : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+                      }`}
+                    >
+                      <ListChecks className="h-3.5 w-3.5" strokeWidth={2} />
+                      <span>Plan</span>
+                    </button>
                   </>
                 )}
               </div>
@@ -1371,14 +1494,14 @@ export default function Chat(): ReactElement {
               )}
 
               {queuedFollowUps.length > 0 && !isRecording && !isTranscribing && (
-                <span className="text-[11px] text-muted-foreground">{queuedFollowUpLabel}</span>
+                <span className="text-ui-11 text-muted-foreground">{queuedFollowUpLabel}</span>
               )}
 
               {/* Right side */}
               <div className="flex items-center gap-1.5 flex-shrink-0">
                 {/* Recording timer */}
                 {isRecording && (
-                  <span className="text-[12px] text-muted-foreground tabular-nums mr-0.5">
+                  <span className="text-ui-12 text-muted-foreground tabular-nums mr-0.5">
                     {formatRecordingTime(recordingTime)}
                   </span>
                 )}
@@ -1387,13 +1510,13 @@ export default function Chat(): ReactElement {
                 {isRecording ? (
                   <button
                     onClick={stopRecording}
-                    className="p-1 hover:bg-secondary rounded-md transition-colors"
+                    className="p-1.5 hover:bg-secondary rounded-md transition-colors"
                     title="Stop recording"
                   >
                     <svg
                       viewBox="0 0 24 24"
                       fill="currentColor"
-                      className="w-4 h-4 text-foreground"
+                      className="w-5 h-5 text-foreground"
                     >
                       <rect x="6" y="6" width="12" height="12" rx="2" />
                     </svg>
@@ -1403,7 +1526,7 @@ export default function Chat(): ReactElement {
                     <button
                       onClick={startRecording}
                       disabled={isStreaming}
-                      className="p-1 hover:bg-secondary rounded-md transition-colors disabled:opacity-50"
+                      className="p-1.5 hover:bg-secondary rounded-md transition-colors disabled:opacity-50"
                       title="Start recording"
                     >
                       <svg
@@ -1413,7 +1536,7 @@ export default function Chat(): ReactElement {
                         strokeWidth="2"
                         strokeLinecap="round"
                         strokeLinejoin="round"
-                        className="w-4 h-4 text-muted-foreground"
+                        className="w-5 h-5 text-muted-foreground"
                       >
                         <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" />
                         <path d="M19 10v2a7 7 0 01-14 0v-2" />
@@ -1434,13 +1557,13 @@ export default function Chat(): ReactElement {
                         turnId: activeTurnId
                       })
                     }}
-                    className="w-7 h-7 flex items-center justify-center rounded-full bg-foreground/10 hover:bg-foreground/20 transition-colors"
+                    className="w-8 h-8 flex items-center justify-center rounded-full bg-foreground/10 hover:bg-foreground/20 transition-colors"
                     title="Interrupt current run"
                   >
                     <svg
                       viewBox="0 0 24 24"
                       fill="currentColor"
-                      className="w-3 h-3 text-foreground"
+                      className="w-3.5 h-3.5 text-foreground"
                     >
                       <rect x="6" y="6" width="12" height="12" rx="1" />
                     </svg>
@@ -1448,7 +1571,7 @@ export default function Chat(): ReactElement {
                 ) : isRecording ? (
                   <button
                     onClick={stopAndSend}
-                    className="w-7 h-7 flex items-center justify-center rounded-full bg-accent text-accent-foreground hover:opacity-90 transition-opacity"
+                    className="w-8 h-8 flex items-center justify-center rounded-full bg-accent text-accent-foreground hover:opacity-90 transition-opacity"
                     title="Send recording"
                   >
                     <svg
@@ -1458,7 +1581,7 @@ export default function Chat(): ReactElement {
                       strokeWidth="2.5"
                       strokeLinecap="round"
                       strokeLinejoin="round"
-                      className="w-3.5 h-3.5"
+                      className="w-4 h-4"
                     >
                       <line x1="12" y1="19" x2="12" y2="5" />
                       <polyline points="5 12 12 5 19 12" />
@@ -1468,7 +1591,7 @@ export default function Chat(): ReactElement {
                   <button
                     onClick={() => void sendMessage()}
                     disabled={!canSend}
-                    className="w-7 h-7 flex items-center justify-center rounded-full bg-accent disabled:bg-muted disabled:text-muted-foreground text-accent-foreground hover:opacity-90 transition-opacity"
+                    className="w-8 h-8 flex items-center justify-center rounded-full bg-accent disabled:bg-muted disabled:text-muted-foreground text-accent-foreground hover:opacity-90 transition-opacity"
                     title={sendButtonTitle}
                   >
                     <svg
@@ -1478,7 +1601,7 @@ export default function Chat(): ReactElement {
                       strokeWidth="2.5"
                       strokeLinecap="round"
                       strokeLinejoin="round"
-                      className="w-3.5 h-3.5"
+                      className="w-4 h-4"
                     >
                       <line x1="12" y1="19" x2="12" y2="5" />
                       <polyline points="5 12 12 5 19 12" />
@@ -1488,7 +1611,7 @@ export default function Chat(): ReactElement {
               </div>
             </div>
             {isDragOverComposer && (
-              <div className="pointer-events-none absolute inset-0 z-10 rounded-xl border border-accent bg-background/90 flex items-center justify-center text-[13px] text-foreground">
+              <div className="pointer-events-none absolute inset-0 z-10 rounded-xl border border-accent bg-background/90 flex items-center justify-center text-ui-13 text-foreground">
                 Drop images or documents to attach
               </div>
             )}
@@ -1513,7 +1636,7 @@ export default function Chat(): ReactElement {
             <img src="./logo.png" alt="Ross" className="w-16 h-16" />
 
             {/* Heading */}
-            <h1 className="text-2xl font-semibold text-foreground">Let&apos;s build</h1>
+            <h1 className="text-ui-2xl font-semibold text-foreground">Let&apos;s build</h1>
 
             {/* Project selector */}
             <div className="relative" ref={projectMenuRef}>
@@ -1522,7 +1645,7 @@ export default function Chat(): ReactElement {
                 className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors"
                 title="Switch project"
               >
-                <span className="text-[15px] font-medium tracking-wide uppercase">
+                <span className="text-ui-15 font-medium tracking-wide uppercase">
                   {activeProject?.name || 'ross'}
                 </span>
                 <svg
@@ -1541,7 +1664,7 @@ export default function Chat(): ReactElement {
                   <div className="py-1">
                     <button
                       onClick={handleOpenProject}
-                      className="flex w-full items-center gap-2.5 px-3 py-1.5 text-[13px] text-popover-foreground transition-colors hover:bg-secondary"
+                      className="flex w-full items-center gap-2.5 px-3 py-1.5 text-ui-13 text-popover-foreground transition-colors hover:bg-secondary"
                     >
                       <svg
                         viewBox="0 0 24 24"
@@ -1563,7 +1686,7 @@ export default function Chat(): ReactElement {
                           setActiveProject(null)
                           setProjectMenuOpen(false)
                         }}
-                        className="flex w-full items-center gap-2.5 px-3 py-1.5 text-[13px] text-muted-foreground transition-colors hover:bg-secondary hover:text-popover-foreground"
+                        className="flex w-full items-center gap-2.5 px-3 py-1.5 text-ui-13 text-muted-foreground transition-colors hover:bg-secondary hover:text-popover-foreground"
                       >
                         <svg
                           viewBox="0 0 24 24"
@@ -1583,7 +1706,7 @@ export default function Chat(): ReactElement {
                     <>
                       <div className="h-px bg-border" />
                       <div className="py-1">
-                        <div className="px-3 py-1 text-[11px] font-medium text-muted-foreground">
+                        <div className="px-3 py-1 text-ui-11 font-medium text-muted-foreground">
                           Recent
                         </div>
                         {recentProjects.map((project) => (
@@ -1593,7 +1716,7 @@ export default function Chat(): ReactElement {
                               setActiveProject(project)
                               setProjectMenuOpen(false)
                             }}
-                            className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-[13px] transition-colors hover:bg-secondary ${
+                            className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-ui-13 transition-colors hover:bg-secondary ${
                               activeProject?.path === project.path
                                 ? 'text-accent'
                                 : 'text-popover-foreground'
@@ -1630,7 +1753,7 @@ export default function Chat(): ReactElement {
           >
             <div className="max-w-2xl mx-auto">
               <div className="flex items-center justify-end gap-2 mb-2">
-                <button className="text-[12px] text-muted-foreground hover:text-foreground transition-colors">
+                <button className="text-ui-12 text-muted-foreground hover:text-foreground transition-colors">
                   Explore more
                 </button>
                 <button
@@ -1661,8 +1784,8 @@ export default function Chat(): ReactElement {
                     }}
                     className="flex flex-col gap-2 p-3 text-left rounded-xl border border-border bg-background hover:bg-secondary/50 transition-colors"
                   >
-                    <span className="text-base">{s.emoji}</span>
-                    <span className="text-[13px] text-foreground leading-snug">{s.text}</span>
+                    <span className="text-ui-base">{s.emoji}</span>
+                    <span className="text-ui-13 text-foreground leading-snug">{s.text}</span>
                   </button>
                 ))}
               </div>
@@ -1670,6 +1793,7 @@ export default function Chat(): ReactElement {
           </motion.div>
         )}
 
+        <TaskRail />
         {inputArea}
       </div>
     )
@@ -1685,6 +1809,7 @@ export default function Chat(): ReactElement {
           <div ref={messagesEndRef} />
         </div>
       </div>
+      <TaskRail />
       {inputArea}
     </div>
   )

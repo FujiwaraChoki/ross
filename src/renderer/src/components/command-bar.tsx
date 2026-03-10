@@ -7,7 +7,8 @@ import {
   ArrowUp,
   ArrowDown,
   Search,
-  ArrowLeft
+  ArrowLeft,
+  Keyboard
 } from 'lucide-react'
 import { useCodexStore } from '@/lib/store'
 
@@ -155,6 +156,21 @@ export default function CommandBar(): ReactElement {
                 <span>Settings</span>
                 <kbd className="cmdk-shortcut">
                   <span>&#8984;</span>,
+                </kbd>
+              </Command.Item>
+              <Command.Item
+                onSelect={() => {
+                  close()
+                  window.dispatchEvent(
+                    new KeyboardEvent('keydown', { key: '/', metaKey: true, bubbles: true })
+                  )
+                }}
+                className="cmdk-item"
+              >
+                <Keyboard className="cmdk-icon" strokeWidth={1.75} />
+                <span>Keyboard shortcuts</span>
+                <kbd className="cmdk-shortcut">
+                  <span>&#8984;</span>/
                 </kbd>
               </Command.Item>
             </Command.Group>

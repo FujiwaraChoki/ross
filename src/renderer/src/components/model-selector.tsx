@@ -1,48 +1,20 @@
-import { useEffect, useState, type ReactElement } from 'react'
+import { type ReactElement } from 'react'
 import { useCodexStore } from '@/lib/store'
 
-interface Model {
-  id: string
-  name?: string
-  displayName?: string
-  hidden?: boolean
-}
-
 export default function ModelSelector(): ReactElement {
-  const { model, setModel } = useCodexStore()
-  const [models, setModels] = useState<Model[]>([])
-
-  useEffect(() => {
-    void window.codex
-      .modelList()
-      .then((result) => {
-        const res = result as { data?: Model[]; models?: Model[] }
-        const list = res?.data ?? res?.models
-        if (list) {
-          setModels(list.filter((m) => !m.hidden))
-        }
-      })
-      .catch(() => {
-        // Fallback models if server isn't ready.
-        setModels([
-          { id: 'gpt-5.3-codex', name: 'gpt-5.3-codex' },
-          { id: 'gpt-5.4', name: 'gpt-5.4' },
-          { id: 'gpt-5.3-codex-spark', name: 'GPT-5.3-Codex-Spark' }
-        ])
-      })
-  }, [])
+  const { model, setModel, availableModels } = useCodexStore()
 
   return (
     <div className="relative no-drag">
       <select
         value={model}
         onChange={(e) => setModel(e.target.value)}
-        className="appearance-none bg-secondary border border-border rounded-lg px-3 py-1.5 pr-7 text-sm text-muted-foreground hover:border-ring focus:outline-none focus:border-ring transition-colors cursor-pointer"
+        className="appearance-none bg-secondary border border-border rounded-lg px-3 py-1.5 pr-7 text-ui-sm text-muted-foreground hover:border-ring focus:outline-none focus:border-ring transition-colors cursor-pointer"
       >
-        {models.length > 0 ? (
-          models.map((m) => (
+        {availableModels.length > 0 ? (
+          availableModels.map((m) => (
             <option key={m.id} value={m.id}>
-              {m.displayName || m.name || m.id}
+              {m.name || m.id}
             </option>
           ))
         ) : (

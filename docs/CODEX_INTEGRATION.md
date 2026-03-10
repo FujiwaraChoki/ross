@@ -90,7 +90,9 @@ Current bridge methods in `src/preload/index.ts`:
 
 1. `chat.tsx` ensures thread exists (`threadStart` if needed).
 2. It appends local user + assistant placeholder messages to store.
-3. It calls `turnStart({ threadId, model, input: [{ type: 'text', text }] })`.
+3. It calls `turnStart({ threadId, model, effort, input: [{ type: 'text', text }] })`.
+   - Standard turns pass the reasoning override with top-level `effort`.
+   - Plan mode mirrors the same selection through `collaborationMode.settings.reasoning_effort`, which takes precedence over the top-level override.
 
 ### Event path (`App.tsx`)
 
@@ -191,6 +193,7 @@ Persistence currently includes:
 - `threads`
 - `activeTab`
 - `model`
+- `reasoningEffort`
 - `autonomyLevel`
 - `isSidebarOpen`
 

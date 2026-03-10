@@ -32,14 +32,14 @@ export default function LoginScreen({ onLogin }: LoginScreenProps): ReactElement
       >
         <div className="flex flex-col items-center gap-3">
           <img src="./logo.png" alt="Ross" className="w-14 h-14 rounded-2xl" />
-          <h1 className="text-xl font-medium text-foreground">Ross</h1>
-          <p className="text-[13px] text-muted-foreground">Desktop Codex client</p>
+          <h1 className="text-ui-xl font-medium text-foreground">Ross</h1>
+          <p className="text-ui-13 text-muted-foreground">Desktop Codex client</p>
         </div>
 
         <button
           onClick={handleLogin}
           disabled={loading}
-          className="px-6 py-2.5 bg-foreground text-background rounded-lg text-[13px] font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+          className="px-6 py-2.5 bg-foreground text-background rounded-lg text-ui-13 font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
         >
           {loading ? (
             <span className="flex items-center gap-2">
@@ -70,7 +70,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps): ReactElement
           <motion.p
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            className="text-[13px] text-red-500/80"
+            className="text-ui-13 text-red-500/80"
           >
             {error}
           </motion.p>

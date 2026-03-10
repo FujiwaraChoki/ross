@@ -34,13 +34,13 @@ export default function ApprovalDialog({
         >
           <div className="flex flex-col gap-4">
             <div>
-              <p className="text-[11px] font-medium text-muted-foreground tracking-wide mb-2.5">
+              <p className="text-ui-11 font-medium text-muted-foreground tracking-wide mb-2.5">
                 {title}
               </p>
-              <p className="text-[13px] text-foreground/70 mb-3">{description}</p>
+              <p className="text-ui-13 text-foreground/70 mb-3">{description}</p>
               {details && (
                 <div className="rounded-md bg-terminal-bg border border-border p-3">
-                  <code className="text-[13px] text-foreground font-mono whitespace-pre-wrap break-all">
+                  <code className="text-ui-13 text-foreground font-mono whitespace-pre-wrap break-all">
                     {details}
                   </code>
                 </div>
@@ -50,13 +50,13 @@ export default function ApprovalDialog({
             <div className="flex gap-2 justify-end">
               <button
                 onClick={onReject}
-                className="px-4 py-1.5 text-[13px] text-muted-foreground hover:text-foreground rounded-md border border-border hover:bg-secondary transition-colors"
+                className="px-4 py-1.5 text-ui-13 text-muted-foreground hover:text-foreground rounded-md border border-border hover:bg-secondary transition-colors"
               >
                 Deny
               </button>
               <button
                 onClick={onApprove}
-                className="px-4 py-1.5 text-[13px] bg-accent text-accent-foreground rounded-md font-medium hover:opacity-90 transition-opacity"
+                className="px-4 py-1.5 text-ui-13 bg-accent text-accent-foreground rounded-md font-medium hover:opacity-90 transition-opacity"
               >
                 Allow
               </button>
