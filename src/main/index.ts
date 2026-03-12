@@ -18,7 +18,7 @@ import {
 import { basename, dirname, extname, join, relative, resolve, sep } from 'path'
 import { homedir } from 'os'
 import { randomUUID } from 'crypto'
-import { mkdir, writeFile, readFile, readdir, stat, rm } from 'fs/promises'
+import { appendFile, mkdir, writeFile, readFile, readdir, stat, rm } from 'fs/promises'
 import { spawn } from 'child_process'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import ignore, { type Ignore } from 'ignore'
@@ -26,6 +26,7 @@ import { CodexServer } from './codex-server'
 import { isAuthenticated, login } from './auth'
 import { transcribeAudio } from './transcribe'
 import { deleteTheme, importTheme, listThemeCatalog } from './theme-library'
+import { coerceCodexEvent } from '../shared/codex-events'
 
 const codexServer = new CodexServer()
 let keepAwakeBlockerId: number | null = null
@@ -167,6 +168,7 @@ const PROJECT_ICON_MIME_TYPES: Record<string, string> = {
 }
 const ROSS_PLANS_DIR = join(homedir(), '.ross', 'plans')
 const APP_STATE_FILENAME = 'app-state.json'
+const DEBUG_EVENT_LOG_FILENAME = 'codex-events.ndjson'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -292,6 +294,35 @@ async function openBundledDocument(relativePath: string): Promise<void> {
 
 function getAppStatePath(): string {
   return join(app.getPath('userData'), APP_STATE_FILENAME)
+}
+
+function getDebugEventLogPath(): string {
+  return join(app.getPath('userData'), DEBUG_EVENT_LOG_FILENAME)
+}
+
+async function appendDebugEventLog(event: {
+  method: string
+  params: Record<string, unknown>
+  requestId?: number | string
+  source?: string
+}): Promise<void> {
+  try {
+    const filePath = getDebugEventLogPath()
+    await mkdir(dirname(filePath), { recursive: true })
+    await appendFile(
+      filePath,
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        source: event.source || 'hostBridge',
+        method: event.method,
+        requestId: event.requestId ?? null,
+        params: event.params
+      })}\n`,
+      'utf8'
+    )
+  } catch (error) {
+    console.error('Failed to append Codex debug event log:', error)
+  }
 }
 
 async function loadStoredAppState(): Promise<unknown | null> {
@@ -782,6 +813,21 @@ function createWindow(): BrowserWindow {
   }
 
   return win
+}
+
+function forwardCodexEventToWindow(win: BrowserWindow, rawEvent: unknown): boolean {
+  const event = coerceCodexEvent(rawEvent, 'hostBridge')
+  if (!event) return false
+
+  if (is.dev) {
+    void appendDebugEventLog(event)
+  }
+
+  win.webContents.send('codex:event', {
+    ...event,
+    source: event.source || 'hostBridge'
+  })
+  return true
 }
 
 app.whenReady().then(() => {
@@ -1383,6 +1429,10 @@ app.whenReady().then(() => {
       }
     }
   )
+
+  ipcMain.handle('codex:ingest-event', (_, event: unknown) => {
+    return forwardCodexEventToWindow(win, event)
+  })
 
   ipcMain.handle('codex:approve-command', (_, params) =>
     codexServer.notify('command/approve', params)

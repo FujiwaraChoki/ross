@@ -6,6 +6,11 @@ interface ApprovalDialogProps {
   title: string
   description: string
   details?: string
+  errorMessage?: string
+  approveLabel?: string
+  rejectLabel?: string
+  isSubmitting?: boolean
+  hideApprove?: boolean
   onApprove: () => void
   onReject: () => void
 }
@@ -14,6 +19,11 @@ export default function ApprovalDialog({
   title,
   description,
   details,
+  errorMessage,
+  approveLabel = 'Allow',
+  rejectLabel = 'Deny',
+  isSubmitting = false,
+  hideApprove = false,
   onApprove,
   onReject
 }: ApprovalDialogProps): ReactElement {
@@ -45,21 +55,26 @@ export default function ApprovalDialog({
                   </code>
                 </div>
               )}
+              {errorMessage && <p className="mt-3 text-ui-12 text-red-500/90">{errorMessage}</p>}
             </div>
 
             <div className="flex gap-2 justify-end">
               <button
                 onClick={onReject}
+                disabled={isSubmitting}
                 className="px-4 py-1.5 text-ui-13 text-muted-foreground hover:text-foreground rounded-md border border-border hover:bg-secondary transition-colors"
               >
-                Deny
+                {rejectLabel}
               </button>
-              <button
-                onClick={onApprove}
-                className="px-4 py-1.5 text-ui-13 bg-accent text-accent-foreground rounded-md font-medium hover:opacity-90 transition-opacity"
-              >
-                Allow
-              </button>
+              {!hideApprove && (
+                <button
+                  onClick={onApprove}
+                  disabled={isSubmitting}
+                  className="px-4 py-1.5 text-ui-13 bg-accent text-accent-foreground rounded-md font-medium hover:opacity-90 transition-opacity disabled:opacity-60"
+                >
+                  {isSubmitting ? 'Sending...' : approveLabel}
+                </button>
+              )}
             </div>
           </div>
         </motion.div>

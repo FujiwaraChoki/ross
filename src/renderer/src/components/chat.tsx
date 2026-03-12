@@ -11,6 +11,7 @@ import {
 } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { FileCode2, FileImage, FileText, ListChecks, X } from 'lucide-react'
+import { toast } from 'sonner'
 import { useShallow } from 'zustand/react/shallow'
 import { ANIMATION_EASE } from '@/lib/animations'
 import {
@@ -393,6 +394,7 @@ function Chat(): ReactElement {
   const projectFilesCacheRef = useRef<Map<string, ProjectFileListResult>>(new Map())
   const queueDispatchInFlightRef = useRef(false)
   const interruptingForSteerRef = useRef(false)
+  const previousServerReadyRef = useRef(false)
 
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
@@ -408,6 +410,7 @@ function Chat(): ReactElement {
     activeTurnThreadId,
     isStreaming,
     streamingThreadId,
+    serverReady,
     model,
     setModel,
     reasoningEffort,
@@ -428,6 +431,7 @@ function Chat(): ReactElement {
       activeTurnThreadId: state.activeTurnThreadId,
       isStreaming: state.isStreaming,
       streamingThreadId: state.streamingThreadId,
+      serverReady: state.serverReady,
       model: state.model,
       setModel: state.setModel,
       reasoningEffort: state.reasoningEffort,
@@ -449,6 +453,16 @@ function Chat(): ReactElement {
       return threadId ? state.threads.find((thread) => thread.id === threadId) || null : null
     }, [])
   )
+
+  useEffect(() => {
+    if (previousServerReadyRef.current && !serverReady && queuedFollowUps.length > 0) {
+      setQueuedFollowUps([])
+      queueDispatchInFlightRef.current = false
+      toast.error('Cleared queued follow-ups because the Codex server disconnected')
+    }
+
+    previousServerReadyRef.current = serverReady
+  }, [queuedFollowUps.length, serverReady])
 
   const models: ModelOption[] =
     storeModels.length > 0
@@ -756,6 +770,11 @@ function Chat(): ReactElement {
 
   const sendPreparedTurn = useCallback(
     async ({ threadId, inputItems, projectCwd, planModeEnabled }: QueuedFollowUp) => {
+      if (!useCodexStore.getState().serverReady) {
+        toast.error('Codex server is unavailable. Reconnect to keep chatting.')
+        return
+      }
+
       const store = useCodexStore.getState()
       const assistantId = crypto.randomUUID()
       const assistantMessage: MessageType = {
@@ -837,6 +856,10 @@ function Chat(): ReactElement {
       options?: { useOppositeFollowUpBehavior?: boolean }
     ) => {
       if ((!text && attachments.length === 0) || isTranscribing) return
+      if (!serverReady) {
+        toast.error('Codex server is unavailable. Reconnect before sending a message.')
+        return
+      }
 
       const store = useCodexStore.getState()
       let threadId = activeThreadId
@@ -944,6 +967,7 @@ function Chat(): ReactElement {
       isStreaming,
       isTranscribing,
       releaseAttachmentPreviews,
+      serverReady,
       sendPreparedTurn,
       planModeEnabled,
       settings.followUpBehavior
@@ -960,7 +984,14 @@ function Chat(): ReactElement {
   )
 
   useEffect(() => {
-    if (isStreaming || queuedFollowUps.length === 0 || queueDispatchInFlightRef.current) return
+    if (
+      !serverReady ||
+      isStreaming ||
+      queuedFollowUps.length === 0 ||
+      queueDispatchInFlightRef.current
+    ) {
+      return
+    }
 
     const [nextFollowUp] = queuedFollowUps
     if (!nextFollowUp) return
@@ -971,7 +1002,7 @@ function Chat(): ReactElement {
     void sendPreparedTurn(nextFollowUp).finally(() => {
       queueDispatchInFlightRef.current = false
     })
-  }, [isStreaming, queuedFollowUps, sendPreparedTurn])
+  }, [isStreaming, queuedFollowUps, sendPreparedTurn, serverReady])
 
   const handleAttachmentButtonClick = useCallback(async () => {
     if (isRecording || isTranscribing) return
@@ -1240,15 +1271,18 @@ function Chat(): ReactElement {
   }
 
   const canSend = (!!input.trim() || pendingAttachments.length > 0) && !isTranscribing
+  const canSubmit = canSend && serverReady
   const queuedFollowUpLabel =
     queuedFollowUps.length === 1
       ? '1 follow-up queued'
       : `${queuedFollowUps.length} follow-ups queued`
-  const sendButtonTitle = isStreaming
-    ? settings.followUpBehavior === 'steer'
-      ? 'Replace the current run with this follow-up'
-      : 'Queue this follow-up after the current run'
-    : 'Send message'
+  const sendButtonTitle = !serverReady
+    ? 'Reconnect to send messages'
+    : isStreaming
+      ? settings.followUpBehavior === 'steer'
+        ? 'Replace the current run with this follow-up'
+        : 'Queue this follow-up after the current run'
+      : 'Send message'
 
   const inputArea = (
     <div className="relative z-10 px-4 pb-5 bg-background">
@@ -1584,9 +1618,9 @@ function Chat(): ReactElement {
                   !isTranscribing && (
                     <button
                       onClick={startRecording}
-                      disabled={isStreaming}
+                      disabled={isStreaming || !serverReady}
                       className="p-1.5 hover:bg-secondary rounded-md transition-colors disabled:opacity-50"
-                      title="Start recording"
+                      title={serverReady ? 'Start recording' : 'Reconnect to record and send'}
                     >
                       <svg
                         viewBox="0 0 24 24"
@@ -1649,7 +1683,7 @@ function Chat(): ReactElement {
                 ) : (
                   <button
                     onClick={() => void sendMessage()}
-                    disabled={!canSend}
+                    disabled={!canSubmit}
                     className="w-8 h-8 flex items-center justify-center rounded-full bg-accent disabled:bg-muted disabled:text-muted-foreground text-accent-foreground hover:opacity-90 transition-opacity"
                     title={sendButtonTitle}
                   >

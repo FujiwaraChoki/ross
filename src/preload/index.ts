@@ -1,11 +1,6 @@
 import { contextBridge, ipcRenderer, webFrame } from 'electron'
 import type { ThemeCatalogEntry } from '../shared/theme'
-
-export type CodexEvent = {
-  method: string
-  params: Record<string, unknown>
-  requestId?: number | string
-}
+import type { CodexEvent } from '../shared/codex-events'
 
 export type CodexApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never'
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
@@ -162,6 +157,8 @@ const codexApi = {
     cwd?: string
   }): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('codex:git-commit', params),
+  ingestEvent: (event: CodexEvent): Promise<boolean> =>
+    ipcRenderer.invoke('codex:ingest-event', event),
   onEvent: (callback: (data: CodexEvent) => void): (() => void) => {
     const handler = (_: Electron.IpcRendererEvent, data: CodexEvent): void => callback(data)
     ipcRenderer.on('codex:event', handler)

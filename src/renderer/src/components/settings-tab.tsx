@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement, type ReactNode } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
+import { ANIMATION_EASE } from '@/lib/animations'
 import {
   ArrowLeft,
   Check,
@@ -1585,10 +1587,48 @@ export default function SettingsTab(): ReactElement {
         </div>
 
         <main className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-background">
-          {activePage === 'Configuration' && <ConfigurationPage />}
-          {activePage === 'MCP servers' && <McpServersPage />}
-          {activePage === 'Personalization' && <PersonalizationPage />}
+          <AnimatePresence mode="wait">
+          {activePage === 'Configuration' && (
+            <motion.div
+              key="configuration"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2, ease: ANIMATION_EASE }}
+            >
+              <ConfigurationPage />
+            </motion.div>
+          )}
+          {activePage === 'MCP servers' && (
+            <motion.div
+              key="mcp"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2, ease: ANIMATION_EASE }}
+            >
+              <McpServersPage />
+            </motion.div>
+          )}
+          {activePage === 'Personalization' && (
+            <motion.div
+              key="personalization"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2, ease: ANIMATION_EASE }}
+            >
+              <PersonalizationPage />
+            </motion.div>
+          )}
           {activePage === 'General' && (
+            <motion.div
+              key="general"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2, ease: ANIMATION_EASE }}
+            >
             <div className="mx-auto w-full max-w-2xl px-10 pb-12 pt-16">
               <h1 className="text-ui-44 font-semibold tracking-tight">General</h1>
 
@@ -1880,7 +1920,9 @@ export default function SettingsTab(): ReactElement {
                 </div>
               </section>
             </div>
+            </motion.div>
           )}
+          </AnimatePresence>
         </main>
       </div>
     </div>

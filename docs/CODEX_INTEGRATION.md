@@ -20,6 +20,10 @@ Renderer (React + Zustand)
           -> JSON-RPC notifications/events
             -> main forwards as 'codex:event'
               -> renderer event reducer in App.tsx
+      -> optional host bridge
+        -> `codex:ingest-event`
+          -> main forwards as 'codex:event'
+            -> same renderer event reducer in App.tsx
 ```
 
 ## Key Files
@@ -37,6 +41,8 @@ Renderer (React + Zustand)
   - Login/auth check shell integration (`codex login`, `~/.codex/auth.json`).
 - `src/preload/index.ts`
   - Secure bridge API exposed as `window.codex`.
+- `src/shared/codex-events.ts`
+  - Shared `CodexEvent` contract for both app-server and host-bridge sources.
 - `src/renderer/src/App.tsx`
   - Central event handling for streamed turn/item updates.
   - Auth bootstrap, server start, approval dialog wiring.
@@ -71,8 +77,21 @@ Current bridge methods in `src/preload/index.ts`:
 - Command approval
   - `approveCommand(params)`
   - `rejectCommand(params)`
+- External/host event bridge
+  - `ingestEvent(event)` forwards a normalized `CodexEvent` into the same `'codex:event'` channel used by app-server.
 - Streaming events
   - `onEvent(callback)` (subscribes to `'codex:event'`)
+
+`CodexEvent` shape:
+
+```ts
+type CodexEvent = {
+  method: string
+  params: Record<string, unknown>
+  requestId?: number | string
+  source?: 'appServer' | 'hostBridge'
+}
+```
 
 ## Startup and Auth Flow
 
@@ -81,8 +100,10 @@ Current bridge methods in `src/preload/index.ts`:
 3. `CodexServer.start()` spawns `codex app-server` and runs:
    - JSON-RPC `initialize`
    - JSON-RPC notification `initialized`
-4. If stderr indicates token refresh/auth failure, main emits `auth/expired`.
-5. Renderer handles `auth/expired` by clearing streaming/approval state and returning to login UI.
+4. Startup is bounded by a 15s timeout. If initialize or the follow-up `initialized` notify stalls, main rejects startup, kills the child process, and emits `server/error` with `duringStartup: true`.
+5. `isAuthenticated()` is only a cached-auth precheck based on `~/.codex/auth.json`. The session is only considered live after `startServer()` succeeds.
+6. If stderr or JSON-RPC errors indicate token refresh/auth failure, main emits `auth/expired`.
+7. Renderer handles `auth/expired` by clearing streaming/approval state, setting `serverReady` false, and returning to login UI.
 
 ## Turn and Streaming Flow
 
@@ -106,12 +127,18 @@ Current bridge methods in `src/preload/index.ts`:
   - appends streamed text either into an active `agentMessage` item or fallback message content.
 - `item/commandExecution/outputDelta`
   - appends command output chunks to the matching item.
+- `item/*/outputDelta`
+  - generic tool output streaming for command, file, MCP, dynamic, collab, web, and image items.
 - `item/completed`
   - marks item complete.
 - `item/commandExecution/requestApproval`
   - opens approval dialog for shell commands.
 - `item/fileChange/requestApproval`
   - opens approval dialog for patch application.
+- `approval/request`
+  - generic request-style approval events, including MCP tool approvals.
+- `item/tool/call`
+  - dynamic tool request from Codex to the client. Ross currently surfaces the request in the transcript and responds with an explicit unsupported result instead of hanging the turn.
 - `turn/completed`
   - marks streaming complete and clears the active turn context. Interrupted turns are surfaced via `turn.status === 'interrupted'`; failed turns can also include a top-level `error` payload that should be rendered to the user instead of failing silently.
 - `error`
@@ -126,6 +153,8 @@ Recent Codex app-server builds send approvals as server-initiated JSON-RPC reque
 - respond with a JSON-RPC result (`{ decision: 'accept' | 'decline' }`) when the user chooses.
 
 Legacy `command/approve` / `command/reject` notifications can remain as a fallback for older server builds, but the request/response path is the reliable one for current Codex integration.
+
+Legacy file-change approvals without a request id are treated as unsupported. Ross surfaces a compatibility error, fails the active turn, and does not attempt to send a side-channel fallback response.
 
 ## Thread Remap Recovery
 
@@ -180,6 +209,8 @@ When adding any new Codex RPC method, do all 4 steps:
 
 If only command-like behavior is needed (no request/response), prefer `notify` with a dedicated IPC route.
 
+If the event source is not `codex app-server` itself, prefer adapting it into `CodexEvent` and feeding it through `codex:ingest-event` rather than creating a second renderer reducer. That keeps transcript handling source-agnostic.
+
 ## State Model Notes
 
 `store.ts` stores:
@@ -200,10 +231,17 @@ Persistence currently includes:
 ## Operational Notes and Gotchas
 
 - `CodexServer.request()` throws if app-server is not running; ensure server startup before calling data methods.
+- `CodexServer.request()` applies method-specific timeouts:
+  - `initialize`: 15s
+  - metadata reads (`model/*`, `config/*`, `skills/*`, `mcpServerStatus/*`, `thread/read`, `thread/list`): 10s
+  - turn/thread control (`thread/start`, `turn/start`, `turn/interrupt`): 20s
 - Thread creation can race if multiple send paths are added; keep one thread-bootstrap path.
 - Be careful when mutating nested store structures; preserve immutability for React updates.
 - `onEvent` in `App.tsx` is the canonical reducer; avoid duplicating stream handling elsewhere.
 - For skills listing, prefer explicit `cwds` if multi-workspace support is introduced.
+- `server/error` and `server/stopped` now include `intentional`, `duringStartup`, and `recoverable`. Renderer reconnect behavior should use those flags instead of inferring from message text.
+- Renderer treats `serverReady` as the send gate. Draft input remains editable while the transport is offline, but sends and queued follow-up dispatch are blocked.
+- Ross performs at most one automatic reconnect attempt 750ms after an unexpected recoverable stop/error. After that, reconnect is manual.
 
 ## Troubleshooting Quick Checks
 
@@ -217,10 +255,16 @@ Persistence currently includes:
   - Ensure `turn/completed` is being received.
   - If the server exits mid-turn, ensure `server/stopped` or equivalent cleanup reaches renderer so `isStreaming` is cleared.
   - Verify active thread/message IDs are valid.
+- Startup hangs:
+  - Check for a timed-out `initialize` request in Electron logs.
+  - Retry after confirming `codex app-server` can launch manually in the shell.
 - Command approval not showing:
   - Confirm event `item/commandExecution/requestApproval` reaches renderer.
   - Confirm file edit approvals (`item/fileChange/requestApproval`) are also handled.
   - If approval reaches renderer but the turn still does not continue, verify the client is replying to the server request id instead of only sending a side-channel notify.
+- File approval immediately fails:
+  - Check whether the event arrived without a JSON-RPC `requestId`.
+  - That indicates an unsupported legacy file-approval flow; reconnect or upgrade Codex and retry.
 
 ## Reference: Events Currently Handled in Renderer
 
@@ -229,8 +273,16 @@ Persistence currently includes:
 - `item/started`
 - `item/completed`
 - `item/commandExecution/outputDelta`
+- `item/fileChange/outputDelta`
+- `item/mcpToolCall/outputDelta`
+- `item/dynamicToolCall/outputDelta`
+- `item/collabToolCall/outputDelta`
+- `item/webSearch/outputDelta`
+- `item/imageView/outputDelta`
 - `item/commandExecution/requestApproval`
 - `item/fileChange/requestApproval`
+- `approval/request`
+- `item/tool/call`
 - `turn/completed`
 - `error`
 - `auth/expired`

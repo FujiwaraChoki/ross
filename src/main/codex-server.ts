@@ -1,6 +1,10 @@
 import { spawn, type ChildProcess } from 'child_process'
 import readline from 'readline'
 import { BrowserWindow } from 'electron'
+import { appendFile, mkdir } from 'fs/promises'
+import { join } from 'path'
+import { homedir } from 'os'
+import type { CodexEvent } from '../shared/codex-events'
 
 interface JsonRpcMessage {
   jsonrpc?: string
@@ -11,7 +15,14 @@ interface JsonRpcMessage {
   error?: { code: number; message: string; data?: unknown }
 }
 
+interface RequestOptions {
+  timeoutMs?: number
+}
+
 interface PendingRequest {
+  method: string
+  startedAt: number
+  timeoutId: NodeJS.Timeout | null
   resolve: (value: unknown) => void
   reject: (reason: Error) => void
 }
@@ -26,6 +37,19 @@ interface TurnStartResultShape {
   collaboration_mode_kind?: unknown
 }
 
+type ServerLifecycle = 'stopped' | 'starting' | 'ready' | 'stopping'
+
+interface ServerEventFlags {
+  intentional: boolean
+  duringStartup: boolean
+  recoverable: boolean
+}
+
+const STARTUP_TIMEOUT_MS = 15_000
+const METADATA_TIMEOUT_MS = 10_000
+const CONTROL_TIMEOUT_MS = 20_000
+const DEBUG_EVENT_LOG_PATH = join(homedir(), 'Library/Application Support/ross/codex-events.ndjson')
+
 function logPlanServer(message: string, details?: Record<string, unknown>): void {
   if (details) {
     console.log('[plan][server]', message, details)
@@ -33,6 +57,29 @@ function logPlanServer(message: string, details?: Record<string, unknown>): void
   }
 
   console.log('[plan][server]', message)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+async function appendDebugEventLog(event: CodexEvent): Promise<void> {
+  try {
+    await mkdir(join(homedir(), 'Library/Application Support/ross'), { recursive: true })
+    await appendFile(
+      DEBUG_EVENT_LOG_PATH,
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        source: event.source || 'appServer',
+        method: event.method,
+        requestId: event.requestId ?? null,
+        params: event.params
+      })}\n`,
+      'utf8'
+    )
+  } catch (error) {
+    console.error('Failed to append Codex debug event log:', error)
+  }
 }
 
 export class CodexServer {
@@ -43,87 +90,186 @@ export class CodexServer {
   private pendingRequests = new Map<number, PendingRequest>()
   private win: BrowserWindow | null = null
   private initPromise: Promise<void> | null = null
+  private lifecycle: ServerLifecycle = 'stopped'
+  private intentionalStop = false
+  private lastAuthExpiredMessage = ''
+  private lastAuthExpiredAt = 0
 
   setWindow(win: BrowserWindow): void {
     this.win = win
   }
 
   start(): Promise<void> {
-    if (this.proc && this.initPromise) {
+    if (this.lifecycle === 'ready' && this.proc) {
+      return Promise.resolve()
+    }
+
+    if (this.initPromise) {
       return this.initPromise
     }
 
-    this.proc = spawn('codex', ['app-server'], {
+    if (this.proc && this.lifecycle === 'stopping') {
+      return Promise.reject(new Error('Codex server is stopping'))
+    }
+
+    const proc = spawn('codex', ['app-server'], {
       stdio: ['pipe', 'pipe', 'pipe']
     })
 
-    this.proc.on('error', (err) => {
+    this.proc = proc
+    this.lifecycle = 'starting'
+    this.intentionalStop = false
+
+    proc.on('error', (err) => {
+      if (this.proc !== proc) return
+
       console.error('[codex] Failed to start codex app-server:', err)
-      this.win?.webContents.send('codex:event', {
-        method: 'server/error',
-        params: { message: err.message }
-      })
       this.failPendingRequests(err)
-      this.resetServerState()
-    })
-
-    this.proc.on('close', (code) => {
-      console.log('codex app-server exited with code', code)
-      this.win?.webContents.send('codex:event', {
-        method: 'server/stopped',
-        params: { code }
+      this.emitServerError(err.message, {
+        intentional: false,
+        duringStartup: this.lifecycle === 'starting',
+        recoverable: true
       })
-      this.failPendingRequests(new Error(`Codex server exited (code: ${code ?? 'unknown'})`))
       this.resetServerState()
     })
 
-    this.rl = readline.createInterface({ input: this.proc.stdout! })
+    proc.on('close', (code) => {
+      if (this.proc !== proc) return
+
+      const intentional = this.intentionalStop
+      const duringStartup = this.lifecycle === 'starting'
+      const recoverable = !intentional && !duringStartup
+
+      console.log('codex app-server exited with code', code)
+      this.failPendingRequests(new Error(`Codex server exited (code: ${code ?? 'unknown'})`))
+      this.emitServerStopped(code, {
+        intentional,
+        duringStartup,
+        recoverable
+      })
+      this.resetServerState()
+    })
+
+    this.rl = readline.createInterface({ input: proc.stdout! })
     this.rl.on('line', (line) => this.handleMessage(line))
 
-    this.stderrRl = readline.createInterface({ input: this.proc.stderr! })
+    this.stderrRl = readline.createInterface({ input: proc.stderr! })
     this.stderrRl.on('line', (line) => this.handleStderr(line))
 
-    // Initialize the connection
-    this.initPromise = this.request('initialize', {
-      clientInfo: { name: 'ross-desktop', title: 'Ross', version: '1.0.1' },
-      capabilities: {
-        experimentalApi: true
-      }
-    })
+    this.initPromise = this.withTimeout(
+      this.request('initialize', {
+        clientInfo: { name: 'ross-desktop', title: 'Ross', version: '1.0.1' },
+        capabilities: {
+          experimentalApi: true
+        }
+      }),
+      STARTUP_TIMEOUT_MS,
+      'initialize'
+    )
       .then((result) => {
         logPlanServer('Initialized app-server connection', {
           experimentalApi: true,
-          result: typeof result === 'object' && result !== null ? result : null
+          result: isRecord(result) ? result : null
         })
-        return result
+
+        if (!this.send({ jsonrpc: '2.0', method: 'initialized', params: {} })) {
+          throw new Error('Failed to send initialized notification to Codex server')
+        }
       })
-      .then(() => this.notify('initialized', {}))
-      .then(() => undefined)
+      .then(() => {
+        this.lifecycle = 'ready'
+      })
+      .catch((error) => {
+        const normalizedError = error instanceof Error ? error : new Error(String(error))
+        const authFailure = this.isAuthFailure(normalizedError.message)
+
+        if (authFailure) {
+          this.emitAuthExpired(normalizedError.message, {
+            intentional: false,
+            duringStartup: true,
+            recoverable: false
+          })
+        } else {
+          this.emitServerError(normalizedError.message, {
+            intentional: false,
+            duringStartup: true,
+            recoverable: true
+          })
+        }
+
+        this.failPendingRequests(normalizedError)
+        this.terminateProcess(proc)
+        this.resetServerState()
+        throw normalizedError
+      })
+      .finally(() => {
+        if (this.lifecycle !== 'ready') {
+          this.initPromise = null
+        }
+      })
 
     return this.initPromise
   }
 
   stop(): void {
-    if (!this.proc && !this.rl && !this.stderrRl) return
+    if (this.lifecycle === 'stopped' || this.lifecycle === 'stopping') return
 
-    if (this.proc) {
-      this.proc.kill()
+    this.intentionalStop = true
+    this.lifecycle = 'stopping'
+
+    if (!this.proc) {
+      this.resetServerState()
+      return
     }
 
-    this.failPendingRequests(new Error('Server stopped'))
-    this.resetServerState()
+    this.proc.kill()
   }
 
-  async request(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  async request(
+    method: string,
+    params: Record<string, unknown> = {},
+    options: RequestOptions = {}
+  ): Promise<unknown> {
     if (!this.proc?.stdin?.writable) {
       throw new Error('Codex server is not running')
     }
 
     const id = ++this.requestId
+    const timeoutMs = options.timeoutMs ?? this.getDefaultTimeoutMs(method)
+
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set(id, { resolve, reject })
+      const startedAt = Date.now()
+      const timeoutId =
+        timeoutMs > 0
+          ? setTimeout(() => {
+              const pending = this.pendingRequests.get(id)
+              if (!pending) return
+
+              this.pendingRequests.delete(id)
+              const elapsedMs = Date.now() - pending.startedAt
+              const error = new Error(
+                `Codex request timed out after ${elapsedMs}ms (${pending.method})`
+              )
+              console.error('[codex] request timeout', {
+                method: pending.method,
+                requestId: id,
+                elapsedMs
+              })
+              pending.reject(error)
+            }, timeoutMs)
+          : null
+
+      this.pendingRequests.set(id, {
+        method,
+        startedAt,
+        timeoutId,
+        resolve,
+        reject
+      })
+
       const sent = this.send({ jsonrpc: '2.0', id, method, params })
       if (!sent) {
+        if (timeoutId) clearTimeout(timeoutId)
         this.pendingRequests.delete(id)
         reject(new Error('Failed to send request to Codex server'))
       }
@@ -144,12 +290,13 @@ export class CodexServer {
     const actualThreadId = this.getThreadIdFromThreadStartResult(result)
 
     if (requestedThreadId && actualThreadId && requestedThreadId !== actualThreadId) {
-      this.win?.webContents.send('codex:event', {
+      this.emitRendererEvent({
         method: 'thread/remapped',
         params: {
           fromThreadId: requestedThreadId,
           toThreadId: actualThreadId
-        }
+        },
+        source: 'appServer'
       })
     }
 
@@ -173,12 +320,13 @@ export class CodexServer {
       }
 
       if (previousThreadId && previousThreadId !== newThreadId) {
-        this.win?.webContents.send('codex:event', {
+        this.emitRendererEvent({
           method: 'thread/remapped',
           params: {
             fromThreadId: previousThreadId,
             toThreadId: newThreadId
-          }
+          },
+          source: 'appServer'
         })
       }
 
@@ -192,6 +340,14 @@ export class CodexServer {
     return true
   }
 
+  private emitRendererEvent(event: CodexEvent): void {
+    void appendDebugEventLog(event)
+    this.win?.webContents.send('codex:event', {
+      ...event,
+      source: event.source || 'appServer'
+    })
+  }
+
   private handleMessage(line: string): void {
     let msg: JsonRpcMessage
     try {
@@ -203,17 +359,31 @@ export class CodexServer {
     if (typeof msg.id === 'number' && this.pendingRequests.has(msg.id)) {
       const pending = this.pendingRequests.get(msg.id)!
       this.pendingRequests.delete(msg.id)
+      if (pending.timeoutId) {
+        clearTimeout(pending.timeoutId)
+      }
+
       if (msg.error) {
+        if (this.isAuthFailure(msg.error.message)) {
+          this.emitAuthExpired(msg.error.message, {
+            intentional: false,
+            duringStartup: pending.method === 'initialize' || this.lifecycle === 'starting',
+            recoverable: false
+          })
+        }
         pending.reject(new Error(msg.error.message))
       } else {
         pending.resolve(msg.result)
       }
-    } else if (msg.method) {
-      // Forward notifications to renderer
-      this.win?.webContents.send('codex:event', {
+      return
+    }
+
+    if (msg.method) {
+      this.emitRendererEvent({
         method: msg.method,
-        params: msg.params,
-        requestId: msg.id
+        params: msg.params || {},
+        requestId: msg.id,
+        source: 'appServer'
       })
     }
   }
@@ -221,26 +391,27 @@ export class CodexServer {
   private handleStderr(line: string): void {
     if (!line.trim()) return
 
-    const text = line.toLowerCase()
-    if (
-      text.includes('tokenrefreshfailed') ||
-      text.includes('invalid_grant') ||
-      text.includes('refresh token is invalid')
-    ) {
-      if (text.includes('rmcp::transport::worker') || text.includes('mcp')) {
-        return
-      }
-
-      this.win?.webContents.send('codex:event', {
-        method: 'auth/expired',
-        params: { message: line }
-      })
+    if (!this.isAuthFailure(line)) {
+      return
     }
+
+    const lowered = line.toLowerCase()
+    if (lowered.includes('rmcp::transport::worker') || lowered.includes('mcp')) {
+      return
+    }
+
+    this.emitAuthExpired(line, {
+      intentional: false,
+      duringStartup: this.lifecycle === 'starting',
+      recoverable: false
+    })
   }
 
   private resetServerState(): void {
     this.proc = null
     this.initPromise = null
+    this.lifecycle = 'stopped'
+    this.intentionalStop = false
 
     if (this.rl) {
       this.rl.close()
@@ -253,12 +424,117 @@ export class CodexServer {
     }
   }
 
+  private terminateProcess(proc: ChildProcess): void {
+    if (this.proc === proc) {
+      this.proc = null
+    }
+
+    if (!proc.killed) {
+      proc.kill()
+    }
+  }
+
   private failPendingRequests(reason: unknown): void {
     const error = reason instanceof Error ? reason : new Error(String(reason))
     for (const [, pending] of this.pendingRequests) {
+      if (pending.timeoutId) {
+        clearTimeout(pending.timeoutId)
+      }
       pending.reject(error)
     }
     this.pendingRequests.clear()
+  }
+
+  private getDefaultTimeoutMs(method: string): number {
+    if (method === 'initialize') return STARTUP_TIMEOUT_MS
+    if (method === 'thread/start' || method === 'turn/start' || method === 'turn/interrupt') {
+      return CONTROL_TIMEOUT_MS
+    }
+
+    if (
+      method === 'thread/read' ||
+      method === 'thread/list' ||
+      method.startsWith('model/') ||
+      method.startsWith('config/') ||
+      method.startsWith('skills/') ||
+      method.startsWith('mcpServerStatus/')
+    ) {
+      return METADATA_TIMEOUT_MS
+    }
+
+    return CONTROL_TIMEOUT_MS
+  }
+
+  private withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        reject(new Error(`Codex ${label} timed out after ${timeoutMs}ms`))
+      }, timeoutMs)
+
+      promise
+        .then((value) => {
+          clearTimeout(timeoutId)
+          resolve(value)
+        })
+        .catch((error) => {
+          clearTimeout(timeoutId)
+          reject(error)
+        })
+    })
+  }
+
+  private emitServerError(message: string, flags: ServerEventFlags): void {
+    this.emitRendererEvent({
+      method: 'server/error',
+      params: {
+        message,
+        ...flags
+      },
+      source: 'appServer'
+    })
+  }
+
+  private emitServerStopped(code: number | null, flags: ServerEventFlags): void {
+    this.emitRendererEvent({
+      method: 'server/stopped',
+      params: {
+        code,
+        ...flags
+      },
+      source: 'appServer'
+    })
+  }
+
+  private emitAuthExpired(message: string, flags: ServerEventFlags): void {
+    const now = Date.now()
+    if (message === this.lastAuthExpiredMessage && now - this.lastAuthExpiredAt < 2000) {
+      return
+    }
+
+    this.lastAuthExpiredMessage = message
+    this.lastAuthExpiredAt = now
+    this.emitRendererEvent({
+      method: 'auth/expired',
+      params: {
+        message,
+        ...flags
+      },
+      source: 'appServer'
+    })
+  }
+
+  private isAuthFailure(value: string): boolean {
+    const text = value.toLowerCase()
+    return (
+      text.includes('tokenrefreshfailed') ||
+      text.includes('invalid_grant') ||
+      text.includes('refresh token is invalid') ||
+      text.includes('authentication failed') ||
+      text.includes('auth expired') ||
+      text.includes('unauthorized') ||
+      text.includes('invalid api key') ||
+      text.includes('session expired')
+    )
   }
 
   private getThreadId(params: Record<string, unknown>): string | null {
@@ -267,10 +543,10 @@ export class CodexServer {
   }
 
   private getThreadIdFromThreadStartResult(result: unknown): string | null {
-    if (typeof result !== 'object' || result === null) return null
-    const maybeThread = (result as { thread?: unknown }).thread
-    if (typeof maybeThread !== 'object' || maybeThread === null) return null
-    const maybeId = (maybeThread as { id?: unknown }).id
+    if (!isRecord(result)) return null
+    const maybeThread = result.thread
+    if (!isRecord(maybeThread)) return null
+    const maybeId = maybeThread.id
     return typeof maybeId === 'string' && maybeId ? maybeId : null
   }
 

@@ -184,13 +184,19 @@ export interface TurnPlanSnapshot {
   plan: TurnPlanStep[]
 }
 
-interface ApprovalRequest {
+export type ApprovalResponseMode = 'request' | 'legacyCommand' | 'unsupported'
+export type ApprovalRequestStatus = 'idle' | 'submitting' | 'error'
+
+export interface ApprovalRequest {
   id: string
   threadId: string
-  kind: 'command' | 'fileChange'
+  kind: 'command' | 'fileChange' | 'mcpTool'
   title: string
   description: string
   details?: string
+  responseMode: ApprovalResponseMode
+  status: ApprovalRequestStatus
+  errorMessage?: string
   requestId?: number | string
 }
 
@@ -343,6 +349,7 @@ interface CodexStore {
   setAuthenticated: (auth: boolean) => void
   setServerReady: (ready: boolean) => void
   setApprovalRequest: (req: ApprovalRequest | null) => void
+  updateApprovalRequest: (updates: Partial<ApprovalRequest>) => void
   setActiveTurn: (
     threadId: string,
     turnId: string | null,
@@ -989,6 +996,10 @@ export const useCodexStore = create<CodexStore>()((set, get) => ({
       )
     })),
   setApprovalRequest: (approvalRequest) => set({ approvalRequest }),
+  updateApprovalRequest: (updates) =>
+    set((state) => ({
+      approvalRequest: state.approvalRequest ? { ...state.approvalRequest, ...updates } : null
+    })),
   setActiveTurn: (threadId, turnId, mode) =>
     set((state) => ({
       activeTurnThreadId: threadId,

@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
+import { ANIMATION_EASE } from '@/lib/animations'
 import {
   buildPersistedCodexStoreState,
   useCodexStore,
@@ -15,6 +17,7 @@ import {
 } from '@/lib/store'
 import {
   buildThreadFromHistory,
+  getFileChangeDetails,
   normalizeProtocolItem,
   parseAssistantText
 } from '@/lib/codex-normalization'
@@ -35,6 +38,7 @@ import CommandBar from '@/components/command-bar'
 import PlanSheet from '@/components/plan-sheet'
 import KeyboardShortcuts from '@/components/keyboard-shortcuts'
 import { Toaster } from '@/components/ui/sonner'
+import { toast } from 'sonner'
 import {
   applyUiPreferences,
   clampCodeFontSize,
@@ -62,6 +66,28 @@ function asObject(value: unknown): Record<string, unknown> | null {
 
 function getString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function getBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined
+}
+
+function looksLikeAuthFailure(value: unknown): boolean {
+  const text =
+    value instanceof Error
+      ? value.message.toLowerCase()
+      : typeof value === 'string'
+        ? value.toLowerCase()
+        : ''
+
+  return (
+    text.includes('tokenrefreshfailed') ||
+    text.includes('invalid_grant') ||
+    text.includes('refresh token is invalid') ||
+    text.includes('authentication failed') ||
+    text.includes('unauthorized') ||
+    text.includes('session expired')
+  )
 }
 
 function getReasoningEffort(value: unknown): ReasoningEffort | null {
@@ -123,6 +149,117 @@ function extractText(value: unknown, depth = 0): string | undefined {
 function getEventItem(params: EventPayload): EventPayload {
   const nested = asObject(params.item)
   return nested || params
+}
+
+function getItemEventTypeFromMethod(
+  method: string,
+  terminalSegments: string[]
+): MessageItem['type'] | null {
+  const segments = method.split(/[/.]/).filter(Boolean)
+  if (segments[0] !== 'item') return null
+  if (segments.length < terminalSegments.length + 2) return null
+
+  const methodTail = segments.slice(-terminalSegments.length)
+  if (methodTail.join('/') !== terminalSegments.join('/')) {
+    return null
+  }
+
+  const rawItemType = segments.slice(1, segments.length - terminalSegments.length).join('_')
+  const normalizedType = normalizeItemType(rawItemType)
+  return normalizedType === 'unknown' ? null : normalizedType
+}
+
+function getOutputDeltaText(params: EventPayload): string {
+  return (
+    getString(params.output) ||
+    getString(params.delta) ||
+    getString(params.diff) ||
+    getString(params.data) ||
+    ''
+  )
+}
+
+function approvalKindToItemType(kind: string | undefined): MessageItem['type'] | null {
+  switch (kind) {
+    case 'command':
+      return 'commandExecution'
+    case 'fileChange':
+    case 'file_change':
+      return 'fileChange'
+    case 'mcpTool':
+    case 'mcp_tool':
+      return 'mcpToolCall'
+    default:
+      return null
+  }
+}
+
+function getApprovalRequestKind(
+  method: string,
+  params: EventPayload
+): 'command' | 'fileChange' | 'mcpTool' | null {
+  if (method === 'approval/request') {
+    const mappedType = approvalKindToItemType(getString(params.type))
+    if (mappedType === 'commandExecution') return 'command'
+    if (mappedType === 'fileChange') return 'fileChange'
+    if (mappedType === 'mcpToolCall') return 'mcpTool'
+    return null
+  }
+
+  const itemType =
+    getItemEventTypeFromMethod(method, ['requestApproval']) ||
+    getItemEventTypeFromMethod(method, ['request_approval'])
+
+  if (itemType === 'commandExecution') return 'command'
+  if (itemType === 'fileChange') return 'fileChange'
+  if (itemType === 'mcpToolCall') return 'mcpTool'
+  return null
+}
+
+function getApprovalRequestDetails(method: string, params: EventPayload): string {
+  if (method === 'approval/request') {
+    const details = asObject(params.details)
+    return (
+      getString(details?.command) ||
+      getString(details?.tool) ||
+      getString(details?.server) ||
+      extractText(details) ||
+      extractText(params.reason) ||
+      ''
+    )
+  }
+
+  return getString(params.command) || extractText(params.reason) || ''
+}
+
+function getApprovalRequestDescription(kind: 'command' | 'fileChange' | 'mcpTool'): string {
+  switch (kind) {
+    case 'fileChange':
+      return 'Codex wants to apply pending file changes before continuing.'
+    case 'mcpTool':
+      return 'Codex wants to invoke an MCP tool before continuing.'
+    case 'command':
+    default:
+      return 'Codex wants to run the following command:'
+  }
+}
+
+function getApprovalRequestTitle(kind: 'command' | 'fileChange' | 'mcpTool'): string {
+  switch (kind) {
+    case 'fileChange':
+      return 'File Change Approval'
+    case 'mcpTool':
+      return 'MCP Tool Approval'
+    case 'command':
+    default:
+      return 'Command Approval'
+  }
+}
+
+function getUnsupportedDynamicToolMessage(toolName: string | undefined): string {
+  return toolName
+    ? `Ross does not support client-side dynamic tool "${toolName}" yet.`
+    : 'Ross does not support client-side dynamic tools yet.'
 }
 
 function getItemId(rawItem: EventPayload): string | undefined {
@@ -426,6 +563,12 @@ function normalizeItemType(rawType: string | undefined): MessageItem['type'] {
   }
 }
 
+function isEditToolName(value: string | undefined): boolean {
+  if (!value) return false
+  const normalized = value.toLowerCase()
+  return normalized.includes('apply_patch') || normalized.includes('file_change')
+}
+
 function isSkippableItem(rawItem: EventPayload): boolean {
   const rawType = getString(rawItem.type)
   if (!rawType) return false
@@ -476,12 +619,14 @@ function getToolOutput(value: unknown): string | undefined {
 
 function buildItemUpdates(rawItem: EventPayload): Partial<MessageItem> {
   const rawType = getString(rawItem.type)
-  const type = normalizeItemType(getString(rawItem.type))
-  const changes = Array.isArray(rawItem.changes) ? rawItem.changes : []
-  const firstChange = asObject(changes[0])
+  const normalizedType = normalizeItemType(getString(rawItem.type))
+  const toolName = getString(rawItem.tool) || getString(rawItem.name)
+  const type =
+    normalizedType === 'toolCall' && isEditToolName(toolName) ? 'fileChange' : normalizedType
   const action = asObject(rawItem.action)
   const target = asObject(rawItem.target)
   const structuredOutput = parseJsonLikeValue(rawItem.output)
+  const fileChange = type === 'fileChange' ? getFileChangeDetails(rawItem) : null
 
   let content = ''
   if (type === 'agentMessage' || type === 'plan' || type === 'reasoning') {
@@ -491,11 +636,7 @@ function buildItemUpdates(rawItem: EventPayload): Partial<MessageItem> {
       extractText(rawItem.summary) ||
       ''
   } else if (type === 'fileChange') {
-    content =
-      extractText(firstChange?.diff) ||
-      extractText(rawItem.output) ||
-      extractText(rawItem.content) ||
-      ''
+    content = fileChange?.content || ''
   } else if (!isToolLikeItemType(type)) {
     content = extractText(rawItem.text) || extractText(rawItem.summary) || ''
   }
@@ -509,19 +650,23 @@ function buildItemUpdates(rawItem: EventPayload): Partial<MessageItem> {
     command: getString(rawItem.command),
     cwd: getString(rawItem.cwd),
     output:
-      (type === 'toolCall' ? getToolOutput(rawItem.output) : undefined) ||
+      (isToolLikeItemType(type) || type === 'fileChange'
+        ? getToolOutput(rawItem.output)
+        : undefined) ||
       getString(rawItem.aggregatedOutput) ||
+      getString(rawItem.diff) ||
+      getString(rawItem.data) ||
       getString(rawItem.output) ||
       (type === 'commandExecution' ? getString(rawItem.content) : undefined),
-    filePath: getString(firstChange?.path) || getString(rawItem.filePath),
-    changeType: getString(firstChange?.kind) || getString(rawItem.changeType),
-    toolName: getString(rawItem.tool) || getString(rawItem.name),
+    filePath: fileChange?.filePath || getString(rawItem.filePath) || getString(rawItem.path),
+    changeType: fileChange?.changeType || getString(rawItem.changeType),
+    toolName,
     server: getString(rawItem.server),
     callId: getString(rawItem.callId) || getString(rawItem.call_id),
     argumentsText: stringifyValue(rawItem.arguments ?? rawItem.input),
     resultText:
       stringifyValue(rawItem.result) ||
-      (type === 'toolCall' && typeof structuredOutput !== 'string'
+      ((isToolLikeItemType(type) || type === 'fileChange') && typeof structuredOutput !== 'string'
         ? stringifyValue(structuredOutput)
         : undefined),
     query:
@@ -539,8 +684,28 @@ function buildItemUpdates(rawItem: EventPayload): Partial<MessageItem> {
       getString(target?.type) ||
       getString(rawItem.user_facing_hint) ||
       undefined,
-    summary: extractText(rawItem.summary) || getString(rawItem.user_facing_hint)
+    summary:
+      extractText(rawItem.summary) || getString(rawItem.user_facing_hint) || fileChange?.summary
   }
+}
+
+function findMessageByIds(
+  threads: Thread[],
+  threadId: string,
+  messageId: string
+): Message | undefined {
+  return threads
+    .find((thread) => thread.id === threadId)
+    ?.messages.find((message) => message.id === messageId)
+}
+
+function findMessageItemByIds(
+  threads: Thread[],
+  threadId: string,
+  messageId: string,
+  itemId: string
+): MessageItem | undefined {
+  return findMessageByIds(threads, threadId, messageId)?.items.find((item) => item.id === itemId)
 }
 
 function buildMessageItem(rawItem: EventPayload): MessageItem {
@@ -617,6 +782,7 @@ export default function App(): ReactElement {
   const {
     activeThreadId,
     isAuthenticated,
+    serverReady,
     setAuthenticated,
     setServerReady,
     setAvailableModels,
@@ -629,6 +795,7 @@ export default function App(): ReactElement {
     setIsStreaming,
     approvalRequest,
     setApprovalRequest,
+    updateApprovalRequest,
     remapThreadId,
     markThreadUnread,
     setStreamingThread,
@@ -640,6 +807,7 @@ export default function App(): ReactElement {
     activeProject,
     recentProjects,
     createThread,
+    setActiveThread,
     updateThreadTitle,
     updateMessage,
     appendToMessage,
@@ -666,11 +834,31 @@ export default function App(): ReactElement {
   const hasAppliedInitialSpeedPreferenceRef = useRef(false)
   const lastPersistedAppStateRef = useRef<string | null>(null)
   const appStateSaveTimeoutRef = useRef<number | null>(null)
+  const bootstrapPromiseRef = useRef<Promise<boolean> | null>(null)
+  const reconnectTimeoutRef = useRef<number | null>(null)
+  const autoReconnectAttemptedRef = useRef(false)
   const [appStateReady, setAppStateReady] = useState(false)
   const [themeCatalogReady, setThemeCatalogReady] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [serverStatusMessage, setServerStatusMessage] = useState<string | null>(null)
+  const [serverStatusRecoverable, setServerStatusRecoverable] = useState(false)
+  const [isBootstrappingServer, setIsBootstrappingServer] = useState(false)
   const { isSidebarOpen, setIsSidebarOpen } = useCodexStore()
   const selectedTheme = themes.find((theme) => theme.id === settings.themeId)
+
+  const persistAppStateNow = useCallback(async (): Promise<void> => {
+    const snapshot = buildPersistedCodexStoreState(useCodexStore.getState())
+    const serializedSnapshot = JSON.stringify(snapshot)
+    if (lastPersistedAppStateRef.current === serializedSnapshot) return
+
+    try {
+      const saved = await window.codex.saveAppState(snapshot)
+      if (!saved) return
+      lastPersistedAppStateRef.current = serializedSnapshot
+    } catch (error) {
+      console.error('Failed to persist app state:', error)
+    }
+  }, [])
 
   const adjustFontSizes = useCallback(
     (delta: number): void => {
@@ -738,6 +926,13 @@ export default function App(): ReactElement {
       setThemeCatalogReady(true)
     }
   }, [setThemes])
+
+  const clearReconnectTimer = useCallback((): void => {
+    if (reconnectTimeoutRef.current != null) {
+      window.clearTimeout(reconnectTimeoutRef.current)
+      reconnectTimeoutRef.current = null
+    }
+  }, [])
 
   const syncThreadTitleFromServer = useCallback(async (threadId: string): Promise<void> => {
     try {
@@ -811,11 +1006,12 @@ export default function App(): ReactElement {
       })
 
       const activeId = useCodexStore.getState().activeThreadId
+      const availableThreadIds = new Set(placeholderThreads.map((thread) => thread.id))
       const recentIds = new Set(
         placeholderThreads
           .slice(0, 8)
           .map((thread) => thread.id)
-          .concat(activeId ? [activeId] : [])
+          .concat(activeId && availableThreadIds.has(activeId) ? [activeId] : [])
       )
 
       const hydratedEntries = await Promise.allSettled(
@@ -839,10 +1035,91 @@ export default function App(): ReactElement {
 
       replaceThreads(placeholderThreads.map((thread) => hydratedThreads.get(thread.id) || thread))
       replaceTasksByThread(nextTasksByThread)
+
+      if (activeId && !availableThreadIds.has(activeId)) {
+        setActiveThread(placeholderThreads[0]?.id || null)
+      }
     } catch (error) {
       console.error('Failed to hydrate threads from server:', error)
     }
-  }, [replaceTasksByThread, replaceThreads])
+  }, [replaceTasksByThread, replaceThreads, setActiveThread])
+
+  const bootstrapServerSession = useCallback(
+    async (source: 'initial' | 'login' | 'auto' | 'manual'): Promise<boolean> => {
+      if (bootstrapPromiseRef.current) {
+        return bootstrapPromiseRef.current
+      }
+
+      clearReconnectTimer()
+      setServerReady(false)
+      setIsBootstrappingServer(true)
+
+      if (source === 'auto') {
+        setServerStatusMessage('Lost connection to Codex. Reconnecting...')
+        setServerStatusRecoverable(true)
+      } else if (source === 'manual') {
+        setServerStatusMessage('Reconnecting to Codex...')
+        setServerStatusRecoverable(true)
+      }
+
+      const promise = (async () => {
+        try {
+          await window.codex.startServer()
+          setServerReady(true)
+          setServerStatusMessage(null)
+          setServerStatusRecoverable(false)
+          autoReconnectAttemptedRef.current = false
+
+          await loadModels()
+          await hydrateThreadsFromServer()
+          await syncKnownThreadTitlesFromServer()
+
+          if (source === 'auto') {
+            toast.success('Reconnected to Codex')
+          } else if (source === 'manual') {
+            toast.success('Codex server connected')
+          }
+
+          return true
+        } catch (error) {
+          console.error('Failed to bootstrap Codex server session:', error)
+
+          const authFailure = looksLikeAuthFailure(error)
+          const fallbackMessage = authFailure
+            ? 'Your Codex session is invalid or expired. Sign in again.'
+            : 'Could not connect to the Codex server.'
+
+          setServerReady(false)
+          setServerStatusMessage(fallbackMessage)
+          setServerStatusRecoverable(!authFailure)
+
+          if (source === 'login' || source === 'manual' || source === 'auto') {
+            toast.error(fallbackMessage)
+          }
+
+          if (authFailure) {
+            setAuthenticated(false)
+          }
+
+          return false
+        } finally {
+          bootstrapPromiseRef.current = null
+          setIsBootstrappingServer(false)
+        }
+      })()
+
+      bootstrapPromiseRef.current = promise
+      return promise
+    },
+    [
+      clearReconnectTimer,
+      hydrateThreadsFromServer,
+      loadModels,
+      setAuthenticated,
+      setServerReady,
+      syncKnownThreadTitlesFromServer
+    ]
+  )
 
   const addStatusItemToAssistant = useCallback(
     (threadId: string, messageId: string, itemId: string, text: string): void => {
@@ -935,6 +1212,59 @@ export default function App(): ReactElement {
       })
     },
     [replaceMessageItems, updateMessage]
+  )
+
+  const handleTurnError = useCallback(
+    (payload: EventPayload): void => {
+      const currentState = useCodexStore.getState()
+      const currentThreads = currentState.threads
+      const threadId = resolveThreadIdForEvent(payload, {
+        threads: currentThreads,
+        activeTurnId: currentState.activeTurnId,
+        activeTurnThreadId: currentState.activeTurnThreadId,
+        streamingThreadId: currentState.streamingThreadId
+      })
+      const currentAssistantId = threadId
+        ? getAssistantMessageIdForThread(currentThreads, threadId)
+        : null
+      const detail =
+        getErrorMessageFromParams(payload) || 'Codex stopped before finishing the turn.'
+
+      if (!threadId || !currentAssistantId) {
+        toast.error(detail)
+        return
+      }
+
+      addStatusItemToAssistant(
+        threadId,
+        currentAssistantId,
+        `turn-error:${currentState.activeTurnId || threadId}`,
+        detail
+      )
+      finalizeAssistantMessage(threadId, currentAssistantId, { itemStatus: 'failed' })
+      postProcessAssistantMessage(threadId, currentAssistantId)
+
+      const isVisible =
+        currentState.activeTab === 'threads' && currentState.activeThreadId === threadId
+      if (!isVisible) {
+        markThreadUnread(threadId, true)
+      }
+
+      setIsStreaming(false)
+      setStreamingThread(null)
+      clearActiveTurn()
+      setApprovalRequest(null)
+    },
+    [
+      addStatusItemToAssistant,
+      clearActiveTurn,
+      finalizeAssistantMessage,
+      markThreadUnread,
+      postProcessAssistantMessage,
+      setApprovalRequest,
+      setIsStreaming,
+      setStreamingThread
+    ]
   )
 
   const applyTaskUpdatesToThread = useCallback(
@@ -1135,30 +1465,20 @@ export default function App(): ReactElement {
       setAuthenticated(auth)
       if (!auth) return
 
-      try {
-        await window.codex.startServer()
-        if (!cancelled) {
-          setServerReady(true)
-          void loadModels()
-          await hydrateThreadsFromServer()
-          await syncKnownThreadTitlesFromServer()
-        }
-      } catch (error) {
-        console.error(error)
-      }
+      await bootstrapServerSession('initial')
+      if (cancelled) return
     })()
 
     return () => {
       cancelled = true
+      clearReconnectTimer()
     }
   }, [
+    bootstrapServerSession,
+    clearReconnectTimer,
     hydrateFromPersistedState,
-    hydrateThreadsFromServer,
-    loadModels,
     loadThemes,
-    setAuthenticated,
-    setServerReady,
-    syncKnownThreadTitlesFromServer
+    setAuthenticated
   ])
 
   useEffect(() => {
@@ -1181,14 +1501,8 @@ export default function App(): ReactElement {
     }
 
     appStateSaveTimeoutRef.current = window.setTimeout(() => {
-      void window.codex
-        .saveAppState(snapshot)
-        .then((saved) => {
-          if (!saved) return
-          lastPersistedAppStateRef.current = serializedSnapshot
-        })
-        .catch((error) => console.error('Failed to persist app state:', error))
-    }, 500)
+      void persistAppStateNow()
+    }, 150)
 
     return () => {
       if (appStateSaveTimeoutRef.current) {
@@ -1210,8 +1524,25 @@ export default function App(): ReactElement {
     settings,
     isStreaming,
     tasksByThreadId,
-    threads
+    threads,
+    persistAppStateNow
   ])
+
+  useEffect(() => {
+    if (!appStateReady) return
+
+    const handleBeforeUnload = (): void => {
+      if (appStateSaveTimeoutRef.current) {
+        clearTimeout(appStateSaveTimeoutRef.current)
+        appStateSaveTimeoutRef.current = null
+      }
+
+      void persistAppStateNow()
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [appStateReady, persistAppStateNow])
 
   useEffect(() => {
     for (const thread of threads) {
@@ -1277,6 +1608,88 @@ export default function App(): ReactElement {
       })
       .catch((error) => console.error('Failed to persist speed preference:', error))
   }, [isAuthenticated, settings.speed])
+
+  const handleServerFailure = useCallback(
+    (
+      payload: EventPayload,
+      options: {
+        method: 'server/error' | 'server/stopped'
+        intentional: boolean
+        duringStartup: boolean
+        recoverable: boolean
+      }
+    ): void => {
+      const currentState = useCodexStore.getState()
+      const currentThreads = currentState.threads
+      const threadId =
+        currentState.activeTurnThreadId ||
+        currentState.streamingThreadId ||
+        getStreamingThreadId(currentThreads)
+      const currentAssistantId = threadId
+        ? getAssistantMessageIdForThread(currentThreads, threadId)
+        : null
+      const detail =
+        options.method === 'server/error'
+          ? getString(payload.message) || 'The Codex server encountered an error.'
+          : `Codex app-server exited${
+              typeof payload.code === 'number' ? ` with code ${payload.code}` : ''
+            } before the turn finished.`
+
+      if (threadId && currentAssistantId) {
+        addStatusItemToAssistant(threadId, currentAssistantId, `server-stop:${threadId}`, detail)
+        finalizeAssistantMessage(threadId, currentAssistantId, { itemStatus: 'failed' })
+
+        const isVisible =
+          currentState.activeTab === 'threads' && currentState.activeThreadId === threadId
+        if (!isVisible) {
+          markThreadUnread(threadId, true)
+        }
+      }
+
+      setServerReady(false)
+      setIsStreaming(false)
+      setStreamingThread(null)
+      clearActiveTurn()
+      setApprovalRequest(null)
+
+      if (options.intentional) {
+        clearReconnectTimer()
+        autoReconnectAttemptedRef.current = false
+        setServerStatusMessage(null)
+        setServerStatusRecoverable(false)
+        return
+      }
+
+      setServerStatusMessage(detail)
+      setServerStatusRecoverable(options.recoverable)
+
+      if (!currentState.isAuthenticated || options.duringStartup || !options.recoverable) {
+        return
+      }
+
+      if (autoReconnectAttemptedRef.current || reconnectTimeoutRef.current != null) {
+        return
+      }
+
+      autoReconnectAttemptedRef.current = true
+      reconnectTimeoutRef.current = window.setTimeout(() => {
+        reconnectTimeoutRef.current = null
+        void bootstrapServerSession('auto')
+      }, 750)
+    },
+    [
+      addStatusItemToAssistant,
+      bootstrapServerSession,
+      clearActiveTurn,
+      clearReconnectTimer,
+      finalizeAssistantMessage,
+      markThreadUnread,
+      setApprovalRequest,
+      setIsStreaming,
+      setServerReady,
+      setStreamingThread
+    ]
+  )
 
   useEffect(() => {
     const cleanup = window.codex.onEvent((event) => {
@@ -1522,14 +1935,21 @@ export default function App(): ReactElement {
               const output = choosePreferredText(existingItem?.output, nextUpdates.output)
               const summary = choosePreferredText(existingItem?.summary, nextUpdates.summary)
 
-              updateItem(threadId, currentAssistantId, itemId, {
-                ...nextUpdates,
-                type,
+              const completedItem: MessageItem = {
+                id: itemId,
+                completed: true,
                 content,
+                ...nextUpdates,
+                type: type || existingItem?.type || 'unknown',
                 output,
-                summary,
-                completed: true
-              })
+                summary
+              }
+
+              if (existingItem) {
+                updateItem(threadId, currentAssistantId, itemId, completedItem)
+              } else {
+                addItemToMessage(threadId, currentAssistantId, completedItem)
+              }
 
               applyTaskUpdatesToThread(
                 threadId,
@@ -1546,30 +1966,19 @@ export default function App(): ReactElement {
         }
 
         case 'item/commandExecution/outputDelta':
-        case 'item/command_execution/output_delta': {
-          const threadId = resolveThreadIdForEvent(p, {
-            threads: currentThreads,
-            activeTurnId,
-            activeTurnThreadId,
-            streamingThreadId
-          })
-          const turnId = getTurnIdFromParams(p)
-          if (activeTurnId && turnId && activeTurnId !== turnId) break
-          const currentAssistantId = threadId
-            ? getAssistantMessageIdForThread(currentThreads, threadId)
-            : null
-          if (currentAssistantId && threadId) {
-            const itemId = getItemId(p)
-            const delta = getString(p.output) || getString(p.delta) || ''
-            if (itemId && delta) {
-              appendToItemOutput(threadId, currentAssistantId, itemId, delta)
-            }
-          }
-          break
-        }
-
+        case 'item/command_execution/output_delta':
         case 'item/fileChange/outputDelta':
-        case 'item/file_change/output_delta': {
+        case 'item/file_change/output_delta':
+        case 'item/mcpToolCall/outputDelta':
+        case 'item/mcp_tool_call/output_delta':
+        case 'item/dynamicToolCall/outputDelta':
+        case 'item/dynamic_tool_call/output_delta':
+        case 'item/collabToolCall/outputDelta':
+        case 'item/collab_tool_call/output_delta':
+        case 'item/webSearch/outputDelta':
+        case 'item/web_search/output_delta':
+        case 'item/imageView/outputDelta':
+        case 'item/image_view/output_delta': {
           const threadId = resolveThreadIdForEvent(p, {
             threads: currentThreads,
             activeTurnId,
@@ -1583,8 +1992,30 @@ export default function App(): ReactElement {
             : null
           if (currentAssistantId && threadId) {
             const itemId = getItemId(p)
-            const delta = getString(p.output) || getString(p.delta) || ''
-            if (itemId && delta) {
+            const delta = getOutputDeltaText(p)
+            const itemType =
+              getItemEventTypeFromMethod(method, ['outputDelta']) ||
+              getItemEventTypeFromMethod(method, ['output_delta'])
+            if (itemId && delta && itemType) {
+              if (!findMessageItemByIds(currentThreads, threadId, currentAssistantId, itemId)) {
+                addItemToMessage(threadId, currentAssistantId, {
+                  id: itemId,
+                  type: itemType,
+                  content: '',
+                  output: '',
+                  completed: false,
+                  ...buildItemUpdates({
+                    ...p,
+                    id: itemId,
+                    type:
+                      itemType === 'commandExecution'
+                        ? 'commandExecution'
+                        : itemType === 'fileChange'
+                          ? 'fileChange'
+                          : itemType
+                  })
+                })
+              }
               appendToItemOutput(threadId, currentAssistantId, itemId, delta)
             }
           }
@@ -1661,10 +2092,75 @@ export default function App(): ReactElement {
           break
         }
 
+        case 'item/tool/call': {
+          const threadId = resolveThreadIdForEvent(p, {
+            threads: currentThreads,
+            activeTurnId,
+            activeTurnThreadId,
+            streamingThreadId
+          })
+          const turnId = getTurnIdFromParams(p)
+          if (activeTurnId && turnId && activeTurnId !== turnId) break
+
+          const currentAssistantId = threadId
+            ? getAssistantMessageIdForThread(currentThreads, threadId)
+            : null
+          const itemId = getString(p.callId) || getString(p.itemId) || getString(p.id)
+          const toolName = getString(p.tool)
+          const unsupportedMessage = getUnsupportedDynamicToolMessage(toolName)
+
+          if (threadId && currentAssistantId && itemId) {
+            if (!findMessageItemByIds(currentThreads, threadId, currentAssistantId, itemId)) {
+              addItemToMessage(threadId, currentAssistantId, {
+                id: itemId,
+                type: 'dynamicToolCall',
+                content: '',
+                completed: false,
+                status: 'requested',
+                ...buildItemUpdates({
+                  ...p,
+                  id: itemId,
+                  type: 'dynamicToolCall'
+                })
+              })
+            }
+
+            updateItem(threadId, currentAssistantId, itemId, {
+              completed: true,
+              status: 'unsupported',
+              output: unsupportedMessage,
+              summary: unsupportedMessage
+            })
+            markUnreadIfHidden(threadId)
+          }
+
+          if (requestId != null) {
+            void window.codex
+              .resolveServerRequest({
+                requestId,
+                result: {
+                  success: false,
+                  contentItems: [{ type: 'inputText', text: unsupportedMessage }]
+                }
+              })
+              .catch((error) => {
+                console.error('Failed to answer unsupported dynamic tool request:', error)
+              })
+          }
+
+          toast.error(
+            toolName
+              ? `Unsupported dynamic tool request: ${toolName}`
+              : 'Unsupported dynamic tool request received'
+          )
+          break
+        }
+
         case 'item/commandExecution/requestApproval':
         case 'item/command_execution/request_approval':
         case 'item/fileChange/requestApproval':
-        case 'item/file_change/request_approval': {
+        case 'item/file_change/request_approval':
+        case 'approval/request': {
           const threadId = resolveThreadIdForEvent(p, {
             threads: currentThreads,
             activeTurnId,
@@ -1672,19 +2168,74 @@ export default function App(): ReactElement {
             streamingThreadId
           })
           if (!threadId) break
-          const isFileChangeApproval =
-            method === 'item/fileChange/requestApproval' ||
-            method === 'item/file_change/request_approval'
+          const approvalKind = getApprovalRequestKind(method, p)
+          const approvalItemType = approvalKind ? approvalKindToItemType(approvalKind) : null
+          if (!approvalKind || !approvalItemType) break
+          const isFileChangeApproval = approvalKind === 'fileChange'
           const reason = extractText(p.reason)
+          const responseMode =
+            requestId != null ? 'request' : isFileChangeApproval ? 'unsupported' : 'legacyCommand'
+
+          if (responseMode === 'unsupported') {
+            const currentAssistantId = getAssistantMessageIdForThread(currentThreads, threadId)
+            const compatibilityMessage =
+              'Ross cannot answer legacy file-change approvals without a request id. Reconnect to Codex and retry with a newer server build.'
+
+            if (currentAssistantId) {
+              addStatusItemToAssistant(
+                threadId,
+                currentAssistantId,
+                `file-approval-unsupported:${threadId}`,
+                compatibilityMessage
+              )
+              finalizeAssistantMessage(threadId, currentAssistantId, { itemStatus: 'failed' })
+              markUnreadIfHidden(threadId)
+            }
+
+            setIsStreaming(false)
+            setStreamingThread(null)
+            clearActiveTurn()
+            toast.error('Unsupported legacy file approval request received')
+          }
+
+          const currentAssistantId = getAssistantMessageIdForThread(currentThreads, threadId)
+          const approvalItemId =
+            getString(p.itemId) || getString(p.id) || (requestId != null ? String(requestId) : '')
+          if (currentAssistantId && approvalItemId) {
+            if (
+              !findMessageItemByIds(currentThreads, threadId, currentAssistantId, approvalItemId)
+            ) {
+              addItemToMessage(threadId, currentAssistantId, {
+                id: approvalItemId,
+                type: approvalItemType,
+                content: '',
+                completed: false,
+                status: 'pending',
+                ...buildItemUpdates({
+                  ...p,
+                  id: approvalItemId,
+                  type: approvalItemType
+                })
+              })
+            }
+          }
+
           setApprovalRequest({
-            id: getString(p.itemId) || getString(p.id) || '',
+            id: approvalItemId,
             threadId,
-            kind: isFileChangeApproval ? 'fileChange' : 'command',
-            title: isFileChangeApproval ? 'File Change Approval' : 'Command Approval',
-            description: isFileChangeApproval
-              ? 'Codex wants to apply pending file changes before continuing.'
-              : 'Codex wants to run the following command:',
-            details: isFileChangeApproval ? reason : getString(p.command) || reason || '',
+            kind: approvalKind,
+            title: getApprovalRequestTitle(approvalKind),
+            description:
+              responseMode === 'unsupported'
+                ? 'This Codex build requested a legacy file approval Ross cannot safely answer. Reconnect and retry after upgrading Codex.'
+                : getApprovalRequestDescription(approvalKind),
+            details: getApprovalRequestDetails(method, p) || reason || '',
+            responseMode,
+            status: 'idle',
+            errorMessage:
+              responseMode === 'unsupported'
+                ? 'Unsupported legacy file approval flow. No response was sent.'
+                : undefined,
             requestId
           })
           break
@@ -1795,46 +2346,36 @@ export default function App(): ReactElement {
           break
         }
 
+        case 'error': {
+          handleTurnError(p)
+          break
+        }
+
         case 'server/error':
         case 'server/stopped': {
-          const threadId =
-            activeTurnThreadId || streamingThreadId || getStreamingThreadId(currentThreads)
-          const currentAssistantId = threadId
-            ? getAssistantMessageIdForThread(currentThreads, threadId)
-            : null
-
-          if (threadId && currentAssistantId) {
-            const detail =
-              method === 'server/error'
-                ? getString(p.message)
-                : `Codex app-server exited${
-                    typeof p.code === 'number' ? ` with code ${p.code}` : ''
-                  } before the turn finished.`
-            if (detail) {
-              addStatusItemToAssistant(
-                threadId,
-                currentAssistantId,
-                `server-stop:${threadId}`,
-                detail
-              )
-            }
-            finalizeAssistantMessage(threadId, currentAssistantId, { itemStatus: 'failed' })
-            markUnreadIfHidden(threadId)
-          }
-
-          setIsStreaming(false)
-          setStreamingThread(null)
-          clearActiveTurn()
-          setApprovalRequest(null)
+          handleServerFailure(p, {
+            method,
+            intentional: getBoolean(p.intentional) === true,
+            duringStartup: getBoolean(p.duringStartup) === true,
+            recoverable: getBoolean(p.recoverable) !== false
+          })
           break
         }
 
         case 'auth/expired': {
+          clearReconnectTimer()
+          autoReconnectAttemptedRef.current = false
+          setServerReady(false)
           setIsStreaming(false)
           setStreamingThread(null)
           clearActiveTurn()
           setApprovalRequest(null)
+          setServerStatusMessage(
+            getString(p.message) || 'Your Codex session expired. Sign in again.'
+          )
+          setServerStatusRecoverable(false)
           setAuthenticated(false)
+          toast.error('Your Codex session expired. Sign in again.')
           break
         }
 
@@ -1865,7 +2406,11 @@ export default function App(): ReactElement {
     setActiveTurn,
     setActiveTurnPlan,
     clearActiveTurn,
+    handleTurnError,
+    handleServerFailure,
     setApprovalRequest,
+    setServerReady,
+    clearReconnectTimer,
     setAuthenticated,
     remapThreadId,
     syncThreadTitleFromServer,
@@ -1881,10 +2426,10 @@ export default function App(): ReactElement {
     const auth = await window.codex.isAuthenticated()
     setAuthenticated(auth)
     if (auth) {
-      await window.codex.startServer()
-      setServerReady(true)
-      await loadModels()
-      await hydrateThreadsFromServer()
+      const started = await bootstrapServerSession('login')
+      if (!started) {
+        throw new Error('Codex server bootstrap failed')
+      }
     }
   }
 
@@ -1893,18 +2438,29 @@ export default function App(): ReactElement {
 
     void (async () => {
       try {
-        if (approvalRequest.requestId != null) {
+        updateApprovalRequest({
+          status: 'submitting',
+          errorMessage: undefined
+        })
+
+        if (approvalRequest.responseMode === 'request' && approvalRequest.requestId != null) {
           await window.codex.resolveServerRequest({
             requestId: approvalRequest.requestId,
             result: { decision: 'accept' }
           })
-        } else if (approvalRequest.kind === 'command') {
+        } else if (approvalRequest.responseMode === 'legacyCommand') {
           await window.codex.approveCommand({ itemId: approvalRequest.id })
+        } else {
+          return
         }
+
+        setApprovalRequest(null)
       } catch (error) {
         console.error('Failed to approve Codex request:', error)
-      } finally {
-        setApprovalRequest(null)
+        updateApprovalRequest({
+          status: 'error',
+          errorMessage: 'Could not send approval response. Try again.'
+        })
       }
     })()
   }
@@ -1914,18 +2470,34 @@ export default function App(): ReactElement {
 
     void (async () => {
       try {
-        if (approvalRequest.requestId != null) {
+        if (approvalRequest.responseMode === 'unsupported') {
+          setApprovalRequest(null)
+          return
+        }
+
+        updateApprovalRequest({
+          status: 'submitting',
+          errorMessage: undefined
+        })
+
+        if (approvalRequest.responseMode === 'request' && approvalRequest.requestId != null) {
           await window.codex.resolveServerRequest({
             requestId: approvalRequest.requestId,
             result: { decision: 'decline' }
           })
-        } else if (approvalRequest.kind === 'command') {
+        } else if (approvalRequest.responseMode === 'legacyCommand') {
           await window.codex.rejectCommand({ itemId: approvalRequest.id })
+        } else {
+          return
         }
+
+        setApprovalRequest(null)
       } catch (error) {
         console.error('Failed to reject Codex request:', error)
-      } finally {
-        setApprovalRequest(null)
+        updateApprovalRequest({
+          status: 'error',
+          errorMessage: 'Could not send rejection response. Try again.'
+        })
       }
     })()
   }
@@ -1940,23 +2512,93 @@ export default function App(): ReactElement {
     <div className="relative h-full overflow-hidden">
       <div className="absolute inset-x-0 top-0 z-50 h-5 drag-region select-none" />
 
-      {isSettingsTab ? (
-        <SettingsTab />
-      ) : (
-        <div className="flex h-full min-h-0">
-          <AppSidebar />
-          <div className="flex min-h-0 flex-1 flex-col min-w-0 overflow-hidden bg-background">
-            <Header />
-            {activeTab === 'skills' ? <SkillsTab /> : <Chat />}
-          </div>
-        </div>
-      )}
+      <AnimatePresence>
+        {!serverReady && serverStatusMessage && isAuthenticated && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.3, ease: ANIMATION_EASE }}
+            className="mx-3 mt-6 flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-ui-12 text-amber-950 dark:text-amber-100"
+          >
+            <span className="min-w-0 flex-1">{serverStatusMessage}</span>
+            {serverStatusRecoverable && (
+              <button
+                type="button"
+                onClick={() => void bootstrapServerSession('manual')}
+                disabled={isBootstrappingServer}
+                className="shrink-0 rounded-md border border-amber-500/40 px-2.5 py-1 text-ui-12 font-medium transition-colors hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isBootstrappingServer ? 'Reconnecting...' : 'Reconnect'}
+              </button>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence mode="wait">
+        {isSettingsTab ? (
+          <motion.div
+            key="settings"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15, ease: ANIMATION_EASE }}
+            className="h-full"
+          >
+            <SettingsTab />
+          </motion.div>
+        ) : (
+          <motion.div
+            key="main"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15, ease: ANIMATION_EASE }}
+            className="flex h-full min-h-0"
+          >
+            <AppSidebar />
+            <div className="flex min-h-0 flex-1 flex-col min-w-0 overflow-hidden bg-background">
+              <Header />
+              <AnimatePresence mode="wait">
+                {activeTab === 'skills' ? (
+                  <motion.div
+                    key="skills"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.15, ease: ANIMATION_EASE }}
+                    className="flex min-h-0 flex-1 flex-col"
+                  >
+                    <SkillsTab />
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key="chat"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.15, ease: ANIMATION_EASE }}
+                    className="flex min-h-0 flex-1 flex-col"
+                  >
+                    <Chat />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {approvalRequest && (
         <ApprovalDialog
           title={approvalRequest.title}
           description={approvalRequest.description}
           details={approvalRequest.details}
+          errorMessage={approvalRequest.errorMessage}
+          isSubmitting={approvalRequest.status === 'submitting'}
+          hideApprove={approvalRequest.responseMode === 'unsupported'}
+          rejectLabel={approvalRequest.responseMode === 'unsupported' ? 'Dismiss' : 'Deny'}
           onApprove={handleApprove}
           onReject={handleReject}
         />

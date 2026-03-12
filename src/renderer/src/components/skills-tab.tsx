@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
 import { Search, RefreshCw, Plus, Folder } from 'lucide-react'
+import { AnimatePresence, motion } from 'framer-motion'
+import { ANIMATION_EASE, staggerItem } from '@/lib/animations'
 import { Switch } from '@/components/ui/switch'
 import { useCodexStore } from '@/lib/store'
 
@@ -180,7 +182,12 @@ export default function SkillsTab(): ReactElement {
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain scrollbar-hide">
-      <div className="max-w-5xl mx-auto px-8 py-8">
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, ease: ANIMATION_EASE }}
+        className="max-w-5xl mx-auto px-8 py-8"
+      >
         {/* Header */}
         <div className="flex items-start justify-between gap-4 mb-1">
           <div>
@@ -220,74 +227,115 @@ export default function SkillsTab(): ReactElement {
         </div>
 
         {/* Error */}
-        {error && (
-          <div className="rounded-lg border border-red-500/25 bg-red-500/5 px-3 py-2 text-ui-13 text-red-600 mt-4">
-            {error}
-          </div>
-        )}
+        <AnimatePresence>
+          {error && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.25, ease: ANIMATION_EASE }}
+              className="overflow-hidden"
+            >
+              <div className="rounded-lg border border-red-500/25 bg-red-500/5 px-3 py-2 text-ui-13 text-red-600 mt-4">
+                {error}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Loading */}
-        {isLoading && (
-          <div className="mt-12 text-center text-ui-13 text-muted-foreground">
-            Loading skills...
-          </div>
-        )}
+        <AnimatePresence mode="wait">
+          {isLoading && (
+            <motion.div
+              key="loading"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2, ease: ANIMATION_EASE }}
+              className="mt-12 text-center text-ui-13 text-muted-foreground"
+            >
+              Loading skills...
+            </motion.div>
+          )}
 
-        {/* Empty */}
-        {!isLoading && allSkills.length === 0 && !error && (
-          <div className="mt-12 text-center text-ui-13 text-muted-foreground">
-            No skills found for the current workspace.
-          </div>
-        )}
+          {/* Empty */}
+          {!isLoading && allSkills.length === 0 && !error && (
+            <motion.div
+              key="empty"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.3, ease: ANIMATION_EASE }}
+              className="mt-12 text-center text-ui-13 text-muted-foreground"
+            >
+              No skills found for the current workspace.
+            </motion.div>
+          )}
 
-        {/* Skills grid */}
-        {!isLoading && filtered.length > 0 && (
-          <div className="mt-6">
-            <p className="text-ui-13 font-medium text-muted-foreground mb-4">Installed</p>
+          {/* Skills grid */}
+          {!isLoading && filtered.length > 0 && (
+            <motion.div
+              key="grid"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2, ease: ANIMATION_EASE }}
+              className="mt-6"
+            >
+              <p className="text-ui-13 font-medium text-muted-foreground mb-4">Installed</p>
 
-            <div className="grid grid-cols-2 gap-x-6 gap-y-4">
-              {filtered.map((skill) => {
-                const displayName = skill.interface?.displayName || skill.name
-                const description = skill.interface?.shortDescription || skill.description
+              <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+                {filtered.map((skill, index) => {
+                  const displayName = skill.interface?.displayName || skill.name
+                  const description = skill.interface?.shortDescription || skill.description
 
-                return (
-                  <div
-                    key={`${skill.source}-${skill.name}`}
-                    className="flex items-start gap-3 min-w-0"
-                  >
-                    <SkillIcon name={skill.name} />
-                    <div className="flex-1 min-w-0 pt-0.5">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="text-ui-13 font-semibold truncate">{displayName}</span>
-                        <span className="flex items-center gap-1 text-ui-11 text-muted-foreground shrink-0">
-                          <Folder className="size-3" />
-                          {skill.source}
-                        </span>
+                  return (
+                    <motion.div
+                      key={`${skill.source}-${skill.name}`}
+                      {...staggerItem(index)}
+                      className="flex items-start gap-3 min-w-0"
+                    >
+                      <SkillIcon name={skill.name} />
+                      <div className="flex-1 min-w-0 pt-0.5">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-ui-13 font-semibold truncate">{displayName}</span>
+                          <span className="flex items-center gap-1 text-ui-11 text-muted-foreground shrink-0">
+                            <Folder className="size-3" />
+                            {skill.source}
+                          </span>
+                        </div>
+                        <p className="text-ui-12 text-muted-foreground mt-0.5 truncate">
+                          {description}
+                        </p>
                       </div>
-                      <p className="text-ui-12 text-muted-foreground mt-0.5 truncate">
-                        {description}
-                      </p>
-                    </div>
-                    <Switch
-                      checked={skill.enabled}
-                      disabled={pendingPaths.includes(skill.path)}
-                      onCheckedChange={(next) => void handleToggleSkill(skill.path, next)}
-                      className="shrink-0 mt-1"
-                    />
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
+                      <Switch
+                        checked={skill.enabled}
+                        disabled={pendingPaths.includes(skill.path)}
+                        onCheckedChange={(next) => void handleToggleSkill(skill.path, next)}
+                        className="shrink-0 mt-1"
+                      />
+                    </motion.div>
+                  )
+                })}
+              </div>
+            </motion.div>
+          )}
 
-        {/* Search with no results */}
-        {!isLoading && filtered.length === 0 && allSkills.length > 0 && (
-          <div className="mt-12 text-center text-ui-13 text-muted-foreground">
-            No skills match &ldquo;{search}&rdquo;
-          </div>
-        )}
-      </div>
+          {/* Search with no results */}
+          {!isLoading && filtered.length === 0 && allSkills.length > 0 && (
+            <motion.div
+              key="no-results"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.3, ease: ANIMATION_EASE }}
+              className="mt-12 text-center text-ui-13 text-muted-foreground"
+            >
+              No skills match &ldquo;{search}&rdquo;
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
     </div>
   )
 }

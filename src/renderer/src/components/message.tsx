@@ -1,9 +1,23 @@
-import { memo, useState, useEffect, useCallback, useMemo, type ReactElement } from 'react'
+import {
+  memo,
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  type CSSProperties,
+  type ReactElement
+} from 'react'
+import { parsePatchFiles, registerCustomCSSVariableTheme } from '@pierre/diffs'
+import { FileDiff, type FileDiffMetadata, type FileDiffProps } from '@pierre/diffs/react'
 import { Check, ChevronDown, Copy } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { ANIMATION_EASE } from '@/lib/animations'
 import CodeBlock from './code-block'
+import CodeCommentCard from './code-comment-card'
+import { Shimmer } from './shimmer'
 import MarkdownRenderer from './markdown-renderer'
+import { parseAssistantText } from '@/lib/codex-normalization'
+import { resolveThemeMode } from '@/lib/ui-preferences'
 import {
   useCodexStore,
   type DirectiveCard,
@@ -15,6 +29,38 @@ import {
 const UI_TEXT_SIZE_CLASS = 'text-[14px]'
 const DISCLOSURE_TRIGGER_CLASS = 'flex items-center gap-2 py-1 text-left'
 const DISCLOSURE_BODY_CLASS = 'ml-[7px] border-l border-border/40 pl-4 py-1'
+const ROSS_DIFF_LIGHT_THEME = 'ross-diff-light'
+const ROSS_DIFF_DARK_THEME = 'ross-diff-dark'
+
+registerCustomCSSVariableTheme(
+  ROSS_DIFF_LIGHT_THEME,
+  {
+    background: 'var(--card, #ffffff)',
+    foreground: 'var(--foreground, #1a1a1a)',
+    'ansi-green': 'color-mix(in srgb, var(--accent, #88fade) 55%, #2f8f68 45%)',
+    'ansi-bright-green': 'color-mix(in srgb, var(--accent, #88fade) 55%, #2f8f68 45%)',
+    'ansi-red': '#c76868',
+    'ansi-bright-red': '#c76868',
+    'ansi-blue': 'color-mix(in srgb, var(--accent, #88fade) 78%, #1a1a1a 22%)',
+    'ansi-bright-blue': 'color-mix(in srgb, var(--accent, #88fade) 78%, #1a1a1a 22%)'
+  },
+  false
+)
+
+registerCustomCSSVariableTheme(
+  ROSS_DIFF_DARK_THEME,
+  {
+    background: 'var(--terminal-bg, #181818)',
+    foreground: 'var(--foreground, #e5e5e5)',
+    'ansi-green': 'color-mix(in srgb, var(--accent, #88fade) 65%, #3fbf84 35%)',
+    'ansi-bright-green': 'color-mix(in srgb, var(--accent, #88fade) 65%, #3fbf84 35%)',
+    'ansi-red': '#ff8b8b',
+    'ansi-bright-red': '#ff8b8b',
+    'ansi-blue': 'color-mix(in srgb, var(--accent, #88fade) 82%, white 18%)',
+    'ansi-bright-blue': 'color-mix(in srgb, var(--accent, #88fade) 82%, white 18%)'
+  },
+  false
+)
 
 function InlineCode({ children }: { children: string }): ReactElement {
   return (
@@ -40,16 +86,6 @@ function WorkDivider({ duration }: { duration?: string }): ReactElement {
         Worked for {duration || '...'}
       </span>
       <div className="flex-1 h-px bg-border" />
-    </div>
-  )
-}
-
-function MetadataLine({ label, value }: { label: string; value?: string }): ReactElement | null {
-  if (!value) return null
-  return (
-    <div className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground`}>
-      <span className="font-medium text-foreground/90">{label}: </span>
-      {value}
     </div>
   )
 }
@@ -109,35 +145,10 @@ function getMeaningfulText(...values: Array<string | undefined>): string {
   return ''
 }
 
-function formatItemTypeLabel(item: MessageItem): string {
-  switch (item.type) {
-    case 'directive':
-      return 'Directive'
-    case 'taskStatus':
-      return 'Task'
-    case 'toolCall':
-      return 'Tool Call'
-    case 'mcpToolCall':
-      return 'MCP Tool'
-    case 'dynamicToolCall':
-      return 'Tool Call'
-    case 'collabToolCall':
-      return 'Delegation'
-    case 'webSearch':
-      return 'Web Search'
-    case 'imageView':
-      return 'Image View'
-    case 'contextCompaction':
-      return 'Context Compaction'
-    case 'enteredReviewMode':
-      return 'Review Mode'
-    case 'exitedReviewMode':
-      return 'Review Mode'
-    case 'unknown':
-      return item.rawType ? item.rawType.replace(/_/g, ' ') : 'Unknown'
-    default:
-      return item.type
-  }
+function getBaseName(path: string): string {
+  const normalized = path.replace(/\\/g, '/')
+  const parts = normalized.split('/').filter(Boolean)
+  return parts[parts.length - 1] || path
 }
 
 function formatTaskStatusLabel(status?: string): string {
@@ -178,69 +189,93 @@ function DirectiveCardItem({
   fallbackContent: string
 }): ReactElement {
   const defaultOpenDestination = useCodexStore((state) => state.settings.defaultOpenDestination)
+  const shouldHydrateDirective =
+    directive.source.startsWith('::') &&
+    (!directive.title ||
+      (!directive.body && directive.source.includes('body=')) ||
+      (!directive.filePath && directive.source.includes('file=')) ||
+      (directive.priority == null && directive.source.includes('priority=')) ||
+      (directive.confidence == null && directive.source.includes('confidence=')))
+  const hydratedDirective = shouldHydrateDirective
+    ? (() => {
+        const reparsedDirective = parseAssistantText(directive.source).directives[0]
+        return reparsedDirective
+          ? {
+              ...directive,
+              ...reparsedDirective,
+              id: directive.id
+            }
+          : directive
+      })()
+    : directive
+
+  if (hydratedDirective.kind === 'codeComment') {
+    return <CodeCommentCard directive={hydratedDirective} />
+  }
 
   const fileMeta =
-    directive.filePath && directive.start
-      ? `${directive.filePath}:${directive.start}${directive.end ? `-${directive.end}` : ''}`
-      : directive.filePath
+    hydratedDirective.filePath && hydratedDirective.start
+      ? `${hydratedDirective.filePath}:${hydratedDirective.start}${hydratedDirective.end ? `-${hydratedDirective.end}` : ''}`
+      : hydratedDirective.filePath
 
   return (
     <div className="my-3 rounded-2xl border border-border/70 bg-card/80 px-4 py-3 shadow-[0_10px_24px_rgba(0,0,0,0.06)]">
       <div className="flex items-start justify-between gap-3">
         <div className="space-y-1">
           <div className="text-ui-10 uppercase tracking-[0.18em] text-muted-foreground">
-            {directive.kind === 'inboxItem'
+            {hydratedDirective.kind === 'inboxItem'
               ? 'Inbox'
-              : directive.kind === 'codeComment'
-                ? 'Code Comment'
-                : directive.kind === 'automationUpdate'
-                  ? 'Automation'
-                  : directive.kind === 'archive' || directive.kind === 'archiveThread'
-                    ? 'Archive'
-                    : 'Directive'}
+              : hydratedDirective.kind === 'automationUpdate'
+                ? 'Automation'
+                : hydratedDirective.kind === 'archive' || hydratedDirective.kind === 'archiveThread'
+                  ? 'Archive'
+                  : 'Directive'}
           </div>
           <div className={`${UI_TEXT_SIZE_CLASS} font-medium text-foreground`}>
-            {directive.title || directive.name || directive.summary || 'Codex directive'}
+            {hydratedDirective.title ||
+              hydratedDirective.name ||
+              hydratedDirective.summary ||
+              'Codex directive'}
           </div>
         </div>
-        {directive.status && (
+        {hydratedDirective.status && (
           <span className="rounded-full bg-secondary px-2 py-0.5 text-ui-10 uppercase tracking-[0.14em] text-muted-foreground">
-            {directive.status}
+            {hydratedDirective.status}
           </span>
         )}
       </div>
 
-      {directive.summary && (
+      {hydratedDirective.summary && (
         <p className={`${UI_TEXT_SIZE_CLASS} mt-2 leading-relaxed text-muted-foreground`}>
-          {directive.summary}
+          {hydratedDirective.summary}
         </p>
       )}
-      {directive.body && (
+      {hydratedDirective.body && (
         <p className={`${UI_TEXT_SIZE_CLASS} mt-2 leading-relaxed text-muted-foreground`}>
-          {directive.body}
+          {hydratedDirective.body}
         </p>
       )}
-      {directive.prompt && (
+      {hydratedDirective.prompt && (
         <div className="mt-3 rounded-xl bg-secondary/50 px-3 py-2">
           <p className="text-ui-10 uppercase tracking-[0.16em] text-muted-foreground">Prompt</p>
           <p className={`${UI_TEXT_SIZE_CLASS} mt-1 leading-relaxed text-foreground`}>
-            {directive.prompt}
+            {hydratedDirective.prompt}
           </p>
         </div>
       )}
-      {(directive.mode || directive.rrule || directive.cwds?.length) && (
+      {(hydratedDirective.mode || hydratedDirective.rrule || hydratedDirective.cwds?.length) && (
         <div className="mt-3 flex flex-wrap gap-2">
-          {directive.mode && (
+          {hydratedDirective.mode && (
             <span className="rounded-full bg-secondary px-2 py-1 text-ui-10 uppercase tracking-[0.14em] text-muted-foreground">
-              {directive.mode}
+              {hydratedDirective.mode}
             </span>
           )}
-          {directive.rrule && (
+          {hydratedDirective.rrule && (
             <span className="rounded-full bg-secondary px-2 py-1 text-ui-10 uppercase tracking-[0.14em] text-muted-foreground">
               Scheduled
             </span>
           )}
-          {directive.cwds?.map((cwd) => (
+          {hydratedDirective.cwds?.map((cwd) => (
             <span
               key={cwd}
               className="rounded-full bg-secondary px-2 py-1 text-ui-10 text-muted-foreground"
@@ -250,21 +285,26 @@ function DirectiveCardItem({
           ))}
         </div>
       )}
-      {directive.filePath && (
+      {hydratedDirective.filePath && (
         <button
           type="button"
-          onClick={() => openLocalPath(directive.filePath!, defaultOpenDestination)}
+          onClick={() => openLocalPath(hydratedDirective.filePath!, defaultOpenDestination)}
           className="mt-3 inline-flex items-center gap-2 rounded-full bg-secondary px-3 py-1.5 text-ui-11 text-foreground transition-colors hover:bg-secondary/80"
           title={fileMeta}
         >
-          <span className="font-mono">{truncateText(fileMeta || directive.filePath, 80)}</span>
+          <span className="font-mono">
+            {truncateText(fileMeta || hydratedDirective.filePath, 80)}
+          </span>
         </button>
       )}
-      {!directive.title && !directive.summary && !directive.body && !directive.prompt && (
-        <div className="mt-3">
-          <CodeBlock code={fallbackContent} language="text" />
-        </div>
-      )}
+      {!hydratedDirective.title &&
+        !hydratedDirective.summary &&
+        !hydratedDirective.body &&
+        !hydratedDirective.prompt && (
+          <div className="mt-3">
+            <CodeBlock code={fallbackContent} language="text" />
+          </div>
+        )}
     </div>
   )
 }
@@ -274,11 +314,13 @@ function TaskStatusItem({ item }: { item: MessageItem }): ReactElement {
     <div className="my-3 rounded-2xl border border-border/60 bg-secondary/35 px-4 py-3">
       <div className="flex items-center gap-2">
         <span className="text-ui-10 uppercase tracking-[0.18em] text-muted-foreground">Task</span>
-        <span
-          className={`rounded-full bg-background/80 px-2 py-0.5 text-ui-10 uppercase tracking-[0.14em] text-muted-foreground ${item.status === 'running' ? 'text-shimmer' : ''}`}
+        <Shimmer
+          active={item.status === 'running'}
+          highlightColor="var(--foreground)"
+          className="rounded-full bg-background/80 px-2 py-0.5 text-ui-10 uppercase tracking-[0.14em] text-muted-foreground"
         >
           {formatTaskStatusLabel(item.status)}
-        </span>
+        </Shimmer>
       </div>
       <div className={`${UI_TEXT_SIZE_CLASS} mt-2 text-foreground`}>
         {item.summary || item.content || 'Background task update'}
@@ -306,11 +348,13 @@ function CommandExecutionItem({ item }: { item: MessageItem }): ReactElement {
         className="w-full py-1.5 text-left group/cmd"
       >
         <div className="flex items-center justify-between gap-3">
-          <p
-            className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground group-hover/cmd:text-foreground transition-colors truncate ${!finished ? 'text-shimmer' : ''}`}
+          <Shimmer
+            active={!finished}
+            highlightColor="var(--foreground)"
+            className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground group-hover/cmd:text-foreground transition-colors truncate`}
           >
             {summaryPrefix} {truncateText(commandText, 110)}
-          </p>
+          </Shimmer>
           <motion.div
             animate={{ rotate: expanded ? 180 : 0 }}
             transition={{ duration: 0.18, ease: 'easeInOut' }}
@@ -404,40 +448,305 @@ function ReasoningItem({ item }: { item: MessageItem }): ReactElement | null {
   )
 }
 
+const FILE_DIFF_OPTIONS: NonNullable<FileDiffProps<undefined>['options']> = {
+  diffStyle: 'unified',
+  hunkSeparators: 'simple',
+  overflow: 'scroll',
+  theme: {
+    light: ROSS_DIFF_LIGHT_THEME,
+    dark: ROSS_DIFF_DARK_THEME
+  }
+}
+
+type DiffThemeStyle = CSSProperties & Record<`--${string}`, string>
+
+const FILE_DIFF_THEME_STYLE: DiffThemeStyle = {
+  '--bg': 'var(--card)',
+  '--fg': 'var(--foreground)',
+  '--diffs-background': 'var(--card)',
+  '--diffs-foreground': 'var(--foreground)',
+  '--diffs-font-family':
+    "var(--app-code-font-family, 'SF Mono', 'Menlo', 'Monaco', ui-monospace, monospace)",
+  '--diffs-header-font-family':
+    "var(--app-code-font-family, 'SF Mono', 'Menlo', 'Monaco', ui-monospace, monospace)",
+  '--diffs-font-size': 'var(--app-code-font-size, 13px)',
+  '--diffs-line-height': 'calc(var(--app-code-font-size, 13px) + 8px)',
+  '--diffs-gap-inline': '10px',
+  '--diffs-gap-block': '10px',
+  '--diffs-bg-separator-override': 'color-mix(in srgb, var(--secondary) 92%, transparent)',
+  '--diffs-bg-buffer-override': 'color-mix(in srgb, var(--muted) 76%, transparent)',
+  '--diffs-bg-hover-override': 'color-mix(in srgb, var(--secondary) 88%, transparent)',
+  '--diffs-bg-context-override': 'color-mix(in srgb, var(--background) 96%, var(--foreground) 4%)',
+  '--diffs-fg-number-override': 'var(--muted-foreground)',
+  '--diffs-bg-addition-override': 'color-mix(in srgb, var(--accent) 15%, transparent)',
+  '--diffs-bg-addition-number-override': 'color-mix(in srgb, var(--accent) 22%, transparent)',
+  '--diffs-bg-addition-hover-override': 'color-mix(in srgb, var(--accent) 20%, transparent)',
+  '--diffs-bg-addition-emphasis-override': 'color-mix(in srgb, var(--accent) 28%, transparent)',
+  '--diffs-bg-deletion-override': 'color-mix(in srgb, #d96b6b 14%, transparent)',
+  '--diffs-bg-deletion-number-override': 'color-mix(in srgb, #d96b6b 20%, transparent)',
+  '--diffs-bg-deletion-hover-override': 'color-mix(in srgb, #d96b6b 18%, transparent)',
+  '--diffs-bg-deletion-emphasis-override': 'color-mix(in srgb, #d96b6b 26%, transparent)',
+  '--diffs-gap-style': '1px solid var(--border)',
+  '--diffs-tab-size': '2'
+}
+
+const FILE_DIFF_UNSAFE_CSS = `
+  :host {
+    color: var(--foreground);
+  }
+
+  [data-diffs-header] {
+    background: color-mix(in srgb, var(--card) 98%, var(--foreground) 2%);
+    border-bottom: 1px solid var(--border);
+  }
+
+  [data-file-info] {
+    background: color-mix(in srgb, var(--secondary) 90%, transparent);
+    border-block-color: var(--border);
+    color: var(--foreground);
+    letter-spacing: -0.01em;
+  }
+
+  [data-diffs],
+  [data-error-wrapper] {
+    background: var(--diffs-bg);
+  }
+
+  [data-code] {
+    font-family: var(--diffs-font-family);
+    font-size: var(--diffs-font-size);
+  }
+
+  [data-separator='line-info'] [data-separator-wrapper],
+  [data-expand-button],
+  [data-separator-content] {
+    background: color-mix(in srgb, var(--secondary) 88%, transparent);
+    border: 1px solid var(--border);
+    box-shadow: none;
+  }
+
+  [data-column-number] {
+    color: var(--muted-foreground);
+  }
+
+  [data-line-type='change-addition'] [data-column-number] {
+    color: color-mix(in srgb, var(--accent) 78%, #34c38f 22%);
+  }
+
+  [data-line-type='change-deletion'] [data-column-number] {
+    color: #ff8b8b;
+  }
+`
+
+function looksLikePatch(text: string): boolean {
+  return (
+    text.includes('diff --git') ||
+    (text.includes('@@') && text.includes('--- ') && text.includes('+++ ')) ||
+    text.startsWith('--- ')
+  )
+}
+
+function buildSyntheticPatch(item: MessageItem, patch: string): string {
+  const trimmed = patch.trim()
+  if (!trimmed || !trimmed.includes('@@')) return patch
+  if (looksLikePatch(trimmed)) return trimmed
+
+  const filePath = item.filePath || 'file'
+  const normalizedPath = filePath.replace(/^\/+/, '')
+  const beforePath = item.changeType === 'create' ? '/dev/null' : `a/${normalizedPath}`
+  const afterPath = item.changeType === 'delete' ? '/dev/null' : `b/${normalizedPath}`
+
+  return `--- ${beforePath}\n+++ ${afterPath}\n${trimmed}`
+}
+
+function parseFileDiffs(item: MessageItem, patch: string): FileDiffMetadata[] {
+  const candidatePatch = buildSyntheticPatch(item, patch)
+  try {
+    return parsePatchFiles(candidatePatch, 'ross-file-change')
+      .flatMap((parsedPatch) => parsedPatch.files)
+      .filter((fileDiff) => fileDiff.hunks.length > 0)
+  } catch (error) {
+    console.warn('Failed to parse file change patch for rendering', error)
+    return []
+  }
+}
+
+function getParsedDiffTotals(parsedDiffs: FileDiffMetadata[]): {
+  additions: number
+  deletions: number
+} {
+  return parsedDiffs.reduce(
+    (totals, fileDiff) => {
+      for (const hunk of fileDiff.hunks) {
+        totals.additions += hunk.additionCount
+        totals.deletions += hunk.deletionCount
+      }
+      return totals
+    },
+    { additions: 0, deletions: 0 }
+  )
+}
+
+function parseJsonLikeText(value: string | undefined): unknown {
+  if (!value) return value
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return value
+
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return value
+  }
+}
+
+function getEditDisplayContent(item: MessageItem): string {
+  if (item.type === 'fileChange') {
+    return item.content || item.output || ''
+  }
+
+  const parsedArguments = parseJsonLikeText(item.argumentsText)
+  if (parsedArguments && typeof parsedArguments === 'object' && !Array.isArray(parsedArguments)) {
+    const patch =
+      typeof (parsedArguments as Record<string, unknown>).patch === 'string'
+        ? ((parsedArguments as Record<string, unknown>).patch as string)
+        : typeof (parsedArguments as Record<string, unknown>).diff === 'string'
+          ? ((parsedArguments as Record<string, unknown>).diff as string)
+          : undefined
+    if (patch) return patch
+  }
+
+  return item.output || item.resultText || item.content || item.argumentsText || ''
+}
+
+function FileChangeItem({ item }: { item: MessageItem }): ReactElement {
+  const themeModePreference = useCodexStore((state) => state.settings.themeMode)
+  const [open, setOpen] = useState(false)
+  const fileLabel =
+    item.filePath ||
+    item.summary ||
+    (isEditLikeToolCall(item) ? 'apply_patch' : undefined) ||
+    'Edited files'
+  const displayContent = getEditDisplayContent(item)
+  const parsedDiffs = useMemo(() => parseFileDiffs(item, displayContent), [displayContent, item])
+  const totals = useMemo(() => getParsedDiffTotals(parsedDiffs), [parsedDiffs])
+  const fallbackLanguage = looksLikePatch(displayContent) ? 'diff' : 'text'
+  const resolvedThemeMode = resolveThemeMode(themeModePreference)
+  const verb =
+    item.changeType === 'create' ? 'Created' : item.changeType === 'delete' ? 'Deleted' : 'Edited'
+  const summaryLabel =
+    parsedDiffs.length === 1
+      ? getBaseName(parsedDiffs[0].name || parsedDiffs[0].prevName || fileLabel)
+      : parsedDiffs.length > 1
+        ? `${parsedDiffs.length} files`
+        : getBaseName(fileLabel)
+  const fileDiffOptions = useMemo<NonNullable<FileDiffProps<undefined>['options']>>(
+    () => ({
+      ...FILE_DIFF_OPTIONS,
+      themeType: resolvedThemeMode,
+      unsafeCSS: FILE_DIFF_UNSAFE_CSS
+    }),
+    [resolvedThemeMode]
+  )
+
+  return (
+    <div className="my-2">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className="group/edit flex w-full items-center justify-between gap-3 py-1.5 text-left"
+      >
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+          <span className="text-[15px] font-medium text-muted-foreground">{verb}</span>
+          <span className="truncate text-[15px] font-medium text-sky-600 dark:text-sky-400">
+            {summaryLabel}
+          </span>
+          {totals.additions > 0 && (
+            <span className="text-[15px] font-semibold text-emerald-600 dark:text-emerald-400">
+              +{totals.additions}
+            </span>
+          )}
+          {totals.deletions > 0 && (
+            <span className="text-[15px] font-semibold text-red-600 dark:text-red-400">
+              -{totals.deletions}
+            </span>
+          )}
+        </div>
+        <motion.div
+          animate={{ rotate: open ? 0 : -90 }}
+          transition={{ duration: 0.16, ease: 'easeInOut' }}
+          className="shrink-0"
+        >
+          <ChevronDown className="h-4 w-4 text-muted-foreground transition-colors group-hover/edit:text-foreground" />
+        </motion.div>
+      </button>
+
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            key="file-change-body"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18, ease: 'easeInOut' }}
+            className="overflow-hidden"
+          >
+            <div className="mt-2 space-y-3">
+              {parsedDiffs.length > 0
+                ? parsedDiffs.map((fileDiff, index) => (
+                    <FileDiff
+                      key={`${fileDiff.prevName || fileDiff.name || 'diff'}:${index}`}
+                      fileDiff={fileDiff}
+                      options={fileDiffOptions}
+                      className="ross-file-diff overflow-hidden rounded-md border border-border bg-background"
+                      style={FILE_DIFF_THEME_STYLE}
+                    />
+                  ))
+                : displayContent && <CodeBlock code={displayContent} language={fallbackLanguage} />}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+function MarkdownWithDirectives({
+  markdown,
+  className
+}: {
+  markdown: string
+  className?: string
+}): ReactElement {
+  const parsed = useMemo(() => parseAssistantText(markdown), [markdown])
+
+  if (parsed.directives.length === 0) {
+    return <MarkdownRenderer markdown={markdown} className={className} />
+  }
+
+  return (
+    <>
+      {parsed.text && <MarkdownRenderer markdown={parsed.text} className={className} />}
+      {parsed.directives.map((directive) => (
+        <DirectiveCardItem
+          key={directive.id}
+          directive={directive}
+          fallbackContent={directive.source}
+        />
+      ))}
+    </>
+  )
+}
+
 function ItemRenderer({ item }: { item: MessageItem }): ReactElement | null {
   switch (item.type) {
     case 'agentMessage':
-      return <MarkdownRenderer markdown={item.content || ''} />
+      return <MarkdownWithDirectives markdown={item.content || ''} />
 
     case 'commandExecution':
       return <CommandExecutionItem item={item} />
 
     case 'fileChange':
-      return (
-        <div className="my-2 overflow-hidden">
-          <div className="flex items-center gap-2 py-1.5">
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              className="w-3.5 h-3.5 text-muted-foreground"
-            >
-              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-              <path d="M14 2v6h6" />
-            </svg>
-            <span className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground font-mono`}>
-              {item.filePath}
-            </span>
-            {item.changeType && (
-              <span className="text-ui-10 uppercase tracking-wider text-muted-foreground">
-                {item.changeType}
-              </span>
-            )}
-          </div>
-          {item.content && <CodeBlock code={item.content} language="diff" />}
-        </div>
-      )
+      return <FileChangeItem item={item} />
 
     case 'reasoning':
       return <ReasoningItem item={item} />
@@ -490,69 +799,36 @@ function ItemRenderer({ item }: { item: MessageItem }): ReactElement | null {
     case 'enteredReviewMode':
     case 'exitedReviewMode':
     case 'unknown': {
-      const hasVisibleData = Boolean(
-        item.status ||
-        item.toolName ||
-        item.server ||
-        item.query ||
-        item.actionType ||
-        item.actionTarget ||
-        item.argumentsText ||
-        item.resultText ||
-        item.output ||
-        item.content
+      if (isEditLikeToolCall(item)) {
+        return <FileChangeItem item={item} />
+      }
+
+      const label = getCompactLabel(item)
+      const hasDetail = Boolean(
+        item.argumentsText || item.resultText || item.output || item.content
       )
-      if (!hasVisibleData) return null
+      if (!label && !hasDetail) return null
 
       return (
-        <div className="my-2 py-2 space-y-1.5">
-          <span className={`${UI_TEXT_SIZE_CLASS} uppercase tracking-wide text-muted-foreground`}>
-            {formatItemTypeLabel(item)}
-          </span>
-          <MetadataLine
-            label="Tool"
-            value={item.server && item.toolName ? `${item.server}.${item.toolName}` : item.toolName}
-          />
-          <MetadataLine
-            label="Action"
-            value={
-              item.actionType && item.actionTarget
-                ? `${item.actionType}: ${item.actionTarget}`
-                : item.actionType || item.actionTarget
-            }
-          />
-          <MetadataLine label="Query" value={item.query} />
-          {item.argumentsText && (
-            <details>
-              <summary className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground cursor-pointer`}>
-                Arguments
-              </summary>
-              <CodeBlock code={item.argumentsText} language="json" />
-            </details>
-          )}
-          {item.resultText && (
-            <details>
-              <summary className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground cursor-pointer`}>
-                Result
-              </summary>
-              <CodeBlock code={item.resultText} language="json" />
-            </details>
-          )}
-          {item.output && (
-            <details>
-              <summary className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground cursor-pointer`}>
-                Output
-              </summary>
-              <TerminalOutput text={item.output} />
-            </details>
-          )}
-          {item.content && !item.argumentsText && !item.resultText && (
-            <div
-              className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground whitespace-pre-wrap leading-relaxed`}
+        <div className="my-1 flex items-center gap-2">
+          {item.completed ? (
+            <Check className="w-3 h-3 text-muted-foreground/50 shrink-0" />
+          ) : (
+            <motion.span
+              className="w-3 h-3 flex items-center justify-center shrink-0"
+              animate={{ opacity: [0.3, 1, 0.3] }}
+              transition={{ duration: 1, repeat: Infinity }}
             >
-              {item.content}
-            </div>
+              <span className="h-1.5 w-1.5 rounded-full bg-foreground/60" />
+            </motion.span>
           )}
+          <span
+            className={`${UI_TEXT_SIZE_CLASS} font-mono truncate ${
+              item.completed ? 'text-muted-foreground' : 'text-foreground/80'
+            }`}
+          >
+            {label}
+          </span>
         </div>
       )
     }
@@ -611,6 +887,16 @@ function groupItems(items: MessageItem[]): RenderSegment[] {
   }
   flush()
   return segments
+}
+
+function isEditLikeToolCall(item: MessageItem): boolean {
+  if (item.type !== 'toolCall') return false
+  const toolName = item.toolName?.toLowerCase()
+  return Boolean(toolName && (toolName.includes('apply_patch') || toolName.includes('file_change')))
+}
+
+function isEditLikeItem(item: MessageItem): boolean {
+  return item.type === 'fileChange' || isEditLikeToolCall(item)
 }
 
 function getCompactLabel(item: MessageItem): string {
@@ -749,11 +1035,13 @@ function ToolCallGroup({ items }: { items: MessageItem[] }): ReactElement {
         >
           <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
         </motion.div>
-        <span
-          className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground ${!allCompleted ? 'text-shimmer' : ''}`}
+        <Shimmer
+          active={!allCompleted}
+          highlightColor="var(--foreground)"
+          className={`${UI_TEXT_SIZE_CLASS} text-muted-foreground`}
         >
           {groupLabel}
-        </span>
+        </Shimmer>
         <span
           className={`${UI_TEXT_SIZE_CLASS} text-foreground/60 transition-colors group-hover/exploration:text-foreground`}
         >
@@ -919,6 +1207,13 @@ function Message({ message }: MessageProps): ReactElement {
         : [],
     [message.items, threadDetail]
   )
+  const assistantOnlyEditSegments = useMemo(
+    () =>
+      threadDetail === 'assistant_only'
+        ? groupItems(message.items.filter((item) => isEditLikeItem(item)))
+        : [],
+    [message.items, threadDetail]
+  )
 
   return (
     <motion.div
@@ -972,7 +1267,22 @@ function Message({ message }: MessageProps): ReactElement {
               )
             )
           ) : (
-            <MarkdownRenderer markdown={assistantText} />
+            <>
+              <MarkdownWithDirectives markdown={assistantText} />
+              {assistantOnlyEditSegments.length > 0 && (
+                <div className="pt-2 space-y-2">
+                  {assistantOnlyEditSegments.map((segment) =>
+                    segment.kind === 'group' ? (
+                      <ToolCallGroup key={segment.items[0].id} items={segment.items} />
+                    ) : (
+                      <div key={segment.item.id} id={`transcript-item-${segment.item.id}`}>
+                        <ItemRenderer item={segment.item} />
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+            </>
           )}
           <StreamingDot active={message.isStreaming} />
           {assistantText && !message.isStreaming && <AssistantCopyButton text={assistantText} />}

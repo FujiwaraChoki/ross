@@ -13,6 +13,7 @@ import {
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { ANIMATION_EASE } from '@/lib/animations'
+import { Shimmer } from './shimmer'
 import { useCodexStore, timeAgo, type Thread } from '@/lib/store'
 import { useResizableSidebar } from '@/lib/use-resizable-sidebar'
 import { getThreadPreview } from '@/lib/thread-preview'
@@ -447,13 +448,13 @@ export default function AppSidebar(): ReactElement {
           {thread.pinned && (
             <Pin className="w-3 h-3 text-sidebar-muted shrink-0" strokeWidth={1.8} />
           )}
-          <span
-            className={`truncate flex-1 min-w-0 select-none ${thread.unread && !isActive ? 'font-medium' : ''} ${
-              isThreadStreaming ? 'thread-title-shimmer' : ''
-            }`}
+          <Shimmer
+            active={isThreadStreaming}
+            highlightColor="var(--sidebar-muted)"
+            className={`truncate flex-1 min-w-0 select-none ${thread.unread && !isActive ? 'font-medium' : ''}`}
           >
             {thread.title}
-          </span>
+          </Shimmer>
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0 ml-1">

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState, type ReactElement } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { AnimatePresence, motion } from 'framer-motion'
+import { ANIMATION_EASE } from '@/lib/animations'
 
 import MarkdownRenderer from '@/components/markdown-renderer'
 import {
@@ -128,16 +130,44 @@ export default function PlanSheet(): ReactElement {
           )}
 
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
-            {loading ? (
-              <p className="text-ui-sm text-muted-foreground">Loading...</p>
-            ) : activePlan ? (
-              <MarkdownRenderer
-                markdown={activePlan.content}
-                className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
-              />
-            ) : (
-              <p className="text-ui-sm text-muted-foreground">No plan to display.</p>
-            )}
+            <AnimatePresence mode="wait">
+              {loading ? (
+                <motion.p
+                  key="loading"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.15, ease: ANIMATION_EASE }}
+                  className="text-ui-sm text-muted-foreground"
+                >
+                  Loading...
+                </motion.p>
+              ) : activePlan ? (
+                <motion.div
+                  key={selectedPlanPath || 'plan'}
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.25, ease: ANIMATION_EASE }}
+                >
+                  <MarkdownRenderer
+                    markdown={activePlan.content}
+                    className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+                  />
+                </motion.div>
+              ) : (
+                <motion.p
+                  key="empty"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.15, ease: ANIMATION_EASE }}
+                  className="text-ui-sm text-muted-foreground"
+                >
+                  No plan to display.
+                </motion.p>
+              )}
+            </AnimatePresence>
           </div>
         </div>
       </SheetContent>

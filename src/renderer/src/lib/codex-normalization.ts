@@ -29,6 +29,102 @@ interface ThreadBuildState {
   tasksByTurnId: Map<string, string>
 }
 
+function mergeMessageItem(existing: TranscriptItem, incoming: TranscriptItem): TranscriptItem {
+  return {
+    ...existing,
+    ...incoming,
+    type: incoming.type === 'unknown' ? existing.type : incoming.type,
+    content: choosePreferredText(existing.content, incoming.content),
+    output: choosePreferredText(existing.output, incoming.output),
+    summary: choosePreferredText(existing.summary, incoming.summary)
+  }
+}
+
+function mergeMessageAttachments(
+  existing: MessageAttachment[],
+  incoming: MessageAttachment[]
+): MessageAttachment[] {
+  const merged: MessageAttachment[] = [...existing]
+
+  incoming.forEach((attachment) => {
+    const duplicate = merged.some(
+      (entry) => entry.id === attachment.id || entry.path === attachment.path
+    )
+    if (!duplicate) {
+      merged.push(attachment)
+    }
+  })
+
+  return merged
+}
+
+function mergeMessageWithPersisted(primary: Message, persisted?: Message): Message {
+  if (!persisted) return primary
+
+  const mergedItems = [...primary.items]
+  persisted.items.forEach((item) => {
+    const existingIndex = mergedItems.findIndex(
+      (entry) =>
+        entry.id === item.id ||
+        (entry.callId != null && item.callId != null && entry.callId === item.callId)
+    )
+
+    if (existingIndex === -1) {
+      mergedItems.push(item)
+      return
+    }
+
+    mergedItems[existingIndex] = mergeMessageItem(mergedItems[existingIndex], item)
+  })
+
+  return {
+    ...primary,
+    content: choosePreferredText(primary.content, persisted.content),
+    attachments: mergeMessageAttachments(primary.attachments, persisted.attachments),
+    items: mergedItems
+  }
+}
+
+function mergeThreadMessagesWithPersisted(
+  messages: Message[],
+  persistedMessages: Message[]
+): Message[] {
+  if (persistedMessages.length === 0) return messages
+
+  const persistedById = new Map(persistedMessages.map((message) => [message.id, message]))
+  const persistedByRole = new Map<Message['role'], Message[]>()
+
+  persistedMessages.forEach((message) => {
+    const bucket = persistedByRole.get(message.role) || []
+    bucket.push(message)
+    persistedByRole.set(message.role, bucket)
+  })
+
+  const usedPersistedIds = new Set<string>()
+  const mergedMessages = messages.map((message) => {
+    const directMatch = persistedById.get(message.id)
+    const roleBucket = persistedByRole.get(message.role) || []
+    const roleMatch = roleBucket.find((entry) => !usedPersistedIds.has(entry.id))
+    const persistedMatch = directMatch || roleMatch
+
+    if (!persistedMatch) return message
+
+    usedPersistedIds.add(persistedMatch.id)
+    return mergeMessageWithPersisted(message, persistedMatch)
+  })
+
+  const unmatchedPersisted = persistedMessages.filter(
+    (message) => !usedPersistedIds.has(message.id)
+  )
+  if (unmatchedPersisted.length === 0) {
+    return mergedMessages
+  }
+
+  return [...mergedMessages, ...unmatchedPersisted].sort(
+    (left, right) => left.timestamp - right.timestamp
+  )
+}
+
 export function asObject(value: unknown): RawObject | null {
   return typeof value === 'object' && value !== null ? (value as RawObject) : null
 }
@@ -106,6 +202,54 @@ export function choosePreferredText(
   if (next.includes(current)) return next
   if (current.includes(next)) return current
   return next.length >= current.length ? next : current
+}
+
+export function getFileChangeDetails(rawItem: RawObject): {
+  content: string
+  filePath?: string
+  changeType?: string
+  summary?: string
+} {
+  const changes = Array.isArray(rawItem.changes)
+    ? rawItem.changes
+        .map((entry) => asObject(entry))
+        .filter((entry): entry is RawObject => Boolean(entry))
+    : []
+
+  const changePaths = changes
+    .map((entry) => getString(entry.path))
+    .filter((entry): entry is string => Boolean(entry))
+  const changeKinds = changes
+    .map((entry) => getString(entry.kind) || getString(entry.type))
+    .filter((entry): entry is string => Boolean(entry))
+  const diffParts = changes
+    .map((entry) => extractText(entry.diff))
+    .filter((entry): entry is string => Boolean(entry))
+
+  const filePath =
+    changePaths.length > 1
+      ? `${changePaths[0]} +${changePaths.length - 1} more`
+      : changePaths[0] || getString(rawItem.path) || getString(rawItem.filePath)
+
+  const changeType =
+    changeKinds[0] || getString(rawItem.kind) || getString(rawItem.changeType) || undefined
+
+  const summary =
+    changePaths.length > 1
+      ? `${changeType === 'create' ? 'Created' : changeType === 'delete' ? 'Deleted' : 'Edited'} ${changePaths.length} files`
+      : undefined
+
+  return {
+    content:
+      diffParts.join('\n\n') ||
+      extractText(rawItem.diff) ||
+      extractText(rawItem.output) ||
+      extractText(rawItem.content) ||
+      '',
+    filePath,
+    changeType,
+    summary
+  }
 }
 
 function normalizeDirectiveKind(rawKind: string): DirectiveKind {
@@ -190,6 +334,12 @@ function normalizeItemType(rawType: string | undefined): TranscriptItem['type'] 
   }
 }
 
+function isEditToolName(value: string | undefined): boolean {
+  if (!value) return false
+  const normalized = value.toLowerCase()
+  return normalized.includes('apply_patch') || normalized.includes('file_change')
+}
+
 function getSemanticCategory(type: TranscriptItem['type']): TranscriptItem['semanticCategory'] {
   switch (type) {
     case 'agentMessage':
@@ -233,7 +383,8 @@ function getStableId(rawItem: RawObject): string | undefined {
 }
 
 function getToolOutput(rawItem: RawObject): { output?: string; parsedOutput?: unknown } {
-  const parsed = parseJsonLikeValue(rawItem.output)
+  const rawOutput = rawItem.output ?? rawItem.diff ?? rawItem.data
+  const parsed = parseJsonLikeValue(rawOutput)
   if (typeof parsed === 'string') {
     return { output: parsed, parsedOutput: undefined }
   }
@@ -279,10 +430,14 @@ function parseDirectiveAttributes(
   return attributes
 }
 
-function toDirectiveCard(rawKind: string, source: string, index: number): DirectiveCard {
+function toDirectiveCard(
+  rawKind: string,
+  source: string,
+  rawAttributes: string,
+  index: number
+): DirectiveCard {
   const kind = normalizeDirectiveKind(rawKind)
-  const attributesSource = source.slice(source.indexOf('{') + 1, source.lastIndexOf('}'))
-  const attributes = parseDirectiveAttributes(attributesSource)
+  const attributes = parseDirectiveAttributes(rawAttributes)
   const rawCwds = attributes.cwds
   const cwds =
     typeof rawCwds === 'string'
@@ -329,12 +484,12 @@ function toDirectiveCard(rawKind: string, source: string, index: number): Direct
 
 function findDirectiveMatches(text: string): ParsedDirectiveMatch[] {
   const matches: ParsedDirectiveMatch[] = []
-  const directivePattern = /::([a-z-]+)\{[^}\n]*\}/g
+  const directivePattern = /::([a-z-]+)\{((?:"(?:[^"\\]|\\.)*"|[^}"])*)\}/g
   let match: RegExpExecArray | null
 
   while ((match = directivePattern.exec(text)) !== null) {
     matches.push({
-      directive: toDirectiveCard(match[1], match[0], matches.length),
+      directive: toDirectiveCard(match[1], match[0], match[2] ?? '', matches.length),
       start: match.index,
       end: match.index + match[0].length
     })
@@ -440,7 +595,10 @@ export function normalizeProtocolItem(
   }
 ): NormalizedCodexEvent {
   const rawType = getString(rawItem.type) || 'unknown'
-  const itemType = normalizeItemType(rawType)
+  const baseItemType = normalizeItemType(rawType)
+  const toolName = getString(rawItem.tool) || getString(rawItem.name)
+  const itemType =
+    baseItemType === 'toolCall' && isEditToolName(toolName) ? 'fileChange' : baseItemType
   const rawFamily = options?.rawFamily || 'history'
   const action = asObject(rawItem.action)
   const target = asObject(rawItem.target)
@@ -449,6 +607,7 @@ export function normalizeProtocolItem(
   const turnId = getString(rawItem.turn_id) || getString(rawItem.turnId)
   const agentId = getString(rawItem.agent_id) || getString(rawItem.agentId)
   const stableId = getStableId(rawItem) || crypto.randomUUID()
+  const fileChange = itemType === 'fileChange' ? getFileChangeDetails(rawItem) : null
   const transcriptItems: TranscriptItem[] = []
   const taskUpdates: TaskCard[] = []
 
@@ -556,23 +715,27 @@ export function normalizeProtocolItem(
             extractText(rawItem.content) ||
             extractText(rawItem.text) ||
             ''
-          : itemType === 'contextCompaction'
-            ? getString(rawItem.message) ||
-              getString(rawItem.user_facing_hint) ||
-              'Context compacted'
-            : extractText(rawItem.text) || extractText(rawItem.content) || '',
+          : itemType === 'fileChange'
+            ? fileChange?.content || ''
+            : itemType === 'contextCompaction'
+              ? getString(rawItem.message) ||
+                getString(rawItem.user_facing_hint) ||
+                'Context compacted'
+              : extractText(rawItem.text) || extractText(rawItem.content) || '',
       status: getString(rawItem.status),
       command: getString(rawItem.command),
       cwd: getString(rawItem.cwd),
-      filePath: getString(rawItem.path) || getString(rawItem.filePath),
-      changeType: getString(rawItem.kind) || getString(rawItem.changeType),
-      toolName: getString(rawItem.tool) || getString(rawItem.name),
+      filePath: fileChange?.filePath || getString(rawItem.path) || getString(rawItem.filePath),
+      changeType:
+        fileChange?.changeType || getString(rawItem.kind) || getString(rawItem.changeType),
+      toolName,
       server: getString(rawItem.server),
       callId,
       agentId,
       turnId,
       output:
         itemType === 'toolCall' ||
+        itemType === 'fileChange' ||
         itemType === 'mcpToolCall' ||
         itemType === 'dynamicToolCall' ||
         itemType === 'collabToolCall'
@@ -582,7 +745,14 @@ export function normalizeProtocolItem(
       argumentsText: stringifyValue(rawItem.arguments ?? rawItem.input),
       resultText:
         stringifyValue(rawItem.result) ||
-        (itemType === 'toolCall' && typeof parsedOutput !== 'string'
+        ((itemType === 'toolCall' ||
+          itemType === 'mcpToolCall' ||
+          itemType === 'dynamicToolCall' ||
+          itemType === 'collabToolCall' ||
+          itemType === 'webSearch' ||
+          itemType === 'imageView' ||
+          itemType === 'fileChange') &&
+        typeof parsedOutput !== 'string'
           ? stringifyValue(parsedOutput)
           : undefined),
       query:
@@ -602,6 +772,7 @@ export function normalizeProtocolItem(
       summary:
         extractText(rawItem.summary) ||
         getString(rawItem.user_facing_hint) ||
+        fileChange?.summary ||
         getString(rawItem.phase) ||
         undefined,
       completed: true
@@ -935,6 +1106,8 @@ export function buildThreadFromHistory(
     unread: fallback?.unread || false,
     archived: fallback?.archived || false
   }
+
+  thread.messages = mergeThreadMessagesWithPersisted(thread.messages, fallback?.messages || [])
 
   const tasks = [...threadState.tasksById.values()].map((task) => ({
     ...task,

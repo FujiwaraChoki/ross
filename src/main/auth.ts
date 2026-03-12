@@ -7,6 +7,9 @@ export function getAuthPath(): string {
   return join(homedir(), '.codex', 'auth.json')
 }
 
+// This is only a cached-auth precheck so the renderer can decide whether to
+// attempt server startup. A valid session is only confirmed once app-server
+// starts successfully.
 export function isAuthenticated(): boolean {
   return existsSync(getAuthPath())
 }

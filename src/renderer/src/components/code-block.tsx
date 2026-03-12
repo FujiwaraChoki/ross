@@ -1,5 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import type { ReactElement } from 'react'
+import { motion } from 'framer-motion'
+import { ANIMATION_EASE } from '@/lib/animations'
 import { createHighlighter, type Highlighter } from 'shiki'
 import { toast } from 'sonner'
 
@@ -70,7 +72,12 @@ export default function CodeBlock({ code, language = 'text' }: CodeBlockProps): 
   }, [code])
 
   return (
-    <div className="rounded-md overflow-hidden border border-border my-1.5 text-[length:var(--app-code-font-size)]">
+    <motion.div
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3, ease: ANIMATION_EASE }}
+      className="rounded-md overflow-hidden border border-border my-1.5 text-[length:var(--app-code-font-size)]"
+    >
       <div className="flex items-center justify-between px-3 py-1 bg-secondary border-b border-border">
         <span className="text-ui-11 text-muted-foreground font-mono">{language}</span>
         <button
@@ -92,6 +99,6 @@ export default function CodeBlock({ code, language = 'text' }: CodeBlockProps): 
           </pre>
         )}
       </div>
-    </div>
+    </motion.div>
   )
 }
