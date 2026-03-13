@@ -13,7 +13,8 @@ import {
   globalShortcut,
   powerSaveBlocker,
   session,
-  Menu
+  Menu,
+  nativeTheme
 } from 'electron'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'path'
 import { homedir } from 'os'
@@ -27,8 +28,11 @@ import { isAuthenticated, login } from './auth'
 import { transcribeAudio } from './transcribe'
 import { deleteTheme, importTheme, listThemeCatalog } from './theme-library'
 import { coerceCodexEvent } from '../shared/codex-events'
+import { loadGhosttyAppearance } from './ghostty-config'
+import { PtyManager } from './pty-manager'
 
 const codexServer = new CodexServer()
+const ptyManager = new PtyManager()
 let keepAwakeBlockerId: number | null = null
 let registeredFontShortcutWindowId: number | null = null
 
@@ -857,6 +861,7 @@ app.whenReady().then(() => {
 
   const win = createWindow()
   codexServer.setWindow(win)
+  ptyManager.setWindow(win)
   const sendFontSizeShortcut = (delta: number): void => {
     if (win.isDestroyed()) return
     win.webContents.send('codex:font-size-shortcut', { delta })
@@ -1449,10 +1454,39 @@ app.whenReady().then(() => {
     }
   )
 
+  // ── Terminal (PTY) handlers ───────────────────────────────────────────────
+
+  ipcMain.handle(
+    'codex:terminal-create',
+    (_, params?: { cwd?: string; cols?: number; rows?: number }) => {
+      return ptyManager.create(params?.cwd, params?.cols, params?.rows)
+    }
+  )
+
+  ipcMain.handle('codex:ghostty-config-read', () => {
+    return loadGhosttyAppearance(nativeTheme.shouldUseDarkColors)
+  })
+
+  ipcMain.handle('codex:terminal-write', (_, params: { id: string; data: string }) => {
+    ptyManager.write(params.id, params.data)
+  })
+
+  ipcMain.handle(
+    'codex:terminal-resize',
+    (_, params: { id: string; cols: number; rows: number }) => {
+      ptyManager.resize(params.id, params.cols, params.rows)
+    }
+  )
+
+  ipcMain.handle('codex:terminal-destroy', (_, params: { id: string }) => {
+    ptyManager.destroy(params.id)
+  })
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       const newWin = createWindow()
       codexServer.setWindow(newWin)
+      ptyManager.setWindow(newWin)
     }
   })
 })
@@ -1462,6 +1496,7 @@ app.on('window-all-closed', () => {
     powerSaveBlocker.stop(keepAwakeBlockerId)
     keepAwakeBlockerId = null
   }
+  ptyManager.destroyAll()
   codexServer.stop()
   if (process.platform !== 'darwin') {
     app.quit()
@@ -1474,5 +1509,6 @@ app.on('before-quit', () => {
     powerSaveBlocker.stop(keepAwakeBlockerId)
     keepAwakeBlockerId = null
   }
+  ptyManager.destroyAll()
   codexServer.stop()
 })

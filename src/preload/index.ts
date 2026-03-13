@@ -38,6 +38,37 @@ export interface ThemeCatalogResponse {
   themes: ThemeCatalogEntry[]
 }
 
+export interface GhosttyAppearance {
+  fontFamily?: string
+  fontSize?: number
+  scrollbackLimit?: number
+  windowPaddingX?: number
+  windowPaddingY?: number
+  background?: string
+  foreground?: string
+  cursor?: string
+  cursorAccent?: string
+  selectionBackground?: string
+  selectionForeground?: string
+  splitDividerColor?: string
+  black?: string
+  red?: string
+  green?: string
+  yellow?: string
+  blue?: string
+  magenta?: string
+  cyan?: string
+  white?: string
+  brightBlack?: string
+  brightRed?: string
+  brightGreen?: string
+  brightYellow?: string
+  brightBlue?: string
+  brightMagenta?: string
+  brightCyan?: string
+  brightWhite?: string
+}
+
 const codexApi = {
   isAuthenticated: (): Promise<boolean> => ipcRenderer.invoke('codex:is-authenticated'),
   login: (): Promise<void> => ipcRenderer.invoke('codex:login'),
@@ -177,6 +208,30 @@ const codexApi = {
   },
   setZoomFactor: (factor: number): void => {
     webFrame.setZoomFactor(factor)
+  },
+
+  // Terminal (PTY)
+  readGhosttyAppearance: (): Promise<GhosttyAppearance | null> =>
+    ipcRenderer.invoke('codex:ghostty-config-read'),
+  terminalCreate: (params?: { cwd?: string; cols?: number; rows?: number }): Promise<string> =>
+    ipcRenderer.invoke('codex:terminal-create', params),
+  terminalWrite: (params: { id: string; data: string }): Promise<void> =>
+    ipcRenderer.invoke('codex:terminal-write', params),
+  terminalResize: (params: { id: string; cols: number; rows: number }): Promise<void> =>
+    ipcRenderer.invoke('codex:terminal-resize', params),
+  terminalDestroy: (params: { id: string }): Promise<void> =>
+    ipcRenderer.invoke('codex:terminal-destroy', params),
+  onTerminalData: (callback: (data: { id: string; data: string }) => void): (() => void) => {
+    const handler = (_: Electron.IpcRendererEvent, data: { id: string; data: string }): void =>
+      callback(data)
+    ipcRenderer.on('codex:terminal-data', handler)
+    return () => ipcRenderer.removeListener('codex:terminal-data', handler)
+  },
+  onTerminalExit: (callback: (data: { id: string; exitCode: number }) => void): (() => void) => {
+    const handler = (_: Electron.IpcRendererEvent, data: { id: string; exitCode: number }): void =>
+      callback(data)
+    ipcRenderer.on('codex:terminal-exit', handler)
+    return () => ipcRenderer.removeListener('codex:terminal-exit', handler)
   }
 }
 

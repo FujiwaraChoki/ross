@@ -39,8 +39,10 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "framer-motion": "^12.35.0",
+    "ghostty-web": "^0.4.0",
     "ignore": "^7.0.5",
     "lucide-react": "^0.577.0",
+    "node-pty": "^1.1.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "shadcn": "^4.0.0",
@@ -76,7 +78,8 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "electron",
-      "esbuild"
+      "esbuild",
+      "node-pty"
     ]
   }
 }

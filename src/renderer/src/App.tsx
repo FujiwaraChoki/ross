@@ -36,6 +36,7 @@ import SettingsTab from '@/components/settings-tab'
 import ApprovalDialog from '@/components/approval-dialog'
 import CommandBar from '@/components/command-bar'
 import PlanSheet from '@/components/plan-sheet'
+import TerminalPanel from '@/components/terminal-panel'
 import KeyboardShortcuts from '@/components/keyboard-shortcuts'
 import { Toaster } from '@/components/ui/sonner'
 import { toast } from 'sonner'
@@ -1421,6 +1422,11 @@ export default function App(): ReactElement {
         e.preventDefault()
         setShortcutsOpen((v) => !v)
       }
+      if (mod && e.key === '.') {
+        e.preventDefault()
+        const store = useCodexStore.getState()
+        store.updateSettings({ isTerminalOpen: !store.settings.isTerminalOpen })
+      }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
@@ -2586,6 +2592,7 @@ export default function App(): ReactElement {
                 )}
               </AnimatePresence>
             </div>
+            <TerminalPanel />
           </motion.div>
         )}
       </AnimatePresence>

@@ -452,6 +452,7 @@ const FILE_DIFF_OPTIONS: NonNullable<FileDiffProps<undefined>['options']> = {
   diffStyle: 'unified',
   hunkSeparators: 'simple',
   overflow: 'scroll',
+  disableFileHeader: true,
   theme: {
     light: ROSS_DIFF_LIGHT_THEME,
     dark: ROSS_DIFF_DARK_THEME
@@ -597,6 +598,339 @@ function parseJsonLikeText(value: string | undefined): unknown {
   } catch {
     return value
   }
+}
+
+function isLocalAbsolutePath(path: string): boolean {
+  return path.startsWith('/') && !path.startsWith('//')
+}
+
+function isExternalUrl(value: string): boolean {
+  return /^(https?:\/\/|mailto:)/i.test(value)
+}
+
+function getImageSource(value: string | undefined): string | null {
+  if (!value) return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (isExternalUrl(trimmed)) return trimmed
+  if (isLocalAbsolutePath(trimmed)) {
+    return `file://${encodeURI(trimmed)}`
+  }
+  return null
+}
+
+function getDetailText(item: MessageItem): string {
+  return item.output || item.resultText || item.content || ''
+}
+
+function getUrlsFromText(...values: Array<string | undefined>): string[] {
+  const urlPattern = /\bhttps?:\/\/[^\s<>()]+/gi
+  const matches = new Set<string>()
+
+  values.forEach((value) => {
+    if (!value) return
+    const found = value.match(urlPattern) || []
+    found.forEach((match) => matches.add(match.replace(/[),.;]+$/, '')))
+  })
+
+  return [...matches]
+}
+
+function renderToolDetailContent(value: string): ReactElement | null {
+  if (!value.trim()) return null
+
+  const parsed = parseJsonLikeText(value)
+  if (typeof parsed !== 'string') {
+    return <CodeBlock code={JSON.stringify(parsed, null, 2)} language="json" />
+  }
+
+  const trimmed = value.trim()
+  if (
+    looksLikePatch(trimmed) ||
+    trimmed.startsWith('{') ||
+    trimmed.startsWith('[') ||
+    trimmed.includes('\n')
+  ) {
+    return <CodeBlock code={value} language={looksLikePatch(trimmed) ? 'diff' : 'text'} />
+  }
+
+  return (
+    <div
+      className={`${UI_TEXT_SIZE_CLASS} whitespace-pre-wrap leading-relaxed text-muted-foreground`}
+    >
+      {value}
+    </div>
+  )
+}
+
+function DetailSection({
+  title,
+  content
+}: {
+  title: string
+  content?: string
+}): ReactElement | null {
+  if (!content?.trim()) return null
+
+  return (
+    <div className="space-y-1.5">
+      <div className="text-ui-10 uppercase tracking-[0.16em] text-muted-foreground">{title}</div>
+      {renderToolDetailContent(content)}
+    </div>
+  )
+}
+
+function ToolStatusPill({ status }: { status?: string }): ReactElement | null {
+  if (!status) return null
+
+  const normalized = status.toLowerCase()
+  const tone =
+    normalized.includes('fail') || normalized.includes('error')
+      ? 'text-red-600 dark:text-red-400 bg-red-500/10'
+      : normalized.includes('wait') ||
+          normalized.includes('pending') ||
+          normalized.includes('request')
+        ? 'text-amber-700 dark:text-amber-300 bg-amber-500/10'
+        : normalized.includes('complete') ||
+            normalized.includes('success') ||
+            normalized.includes('supported')
+          ? 'text-emerald-700 dark:text-emerald-300 bg-emerald-500/10'
+          : 'text-muted-foreground bg-secondary/60'
+
+  return (
+    <span className={`rounded-full px-2 py-0.5 text-ui-10 uppercase tracking-[0.14em] ${tone}`}>
+      {status}
+    </span>
+  )
+}
+
+function ToolLink({ href, label }: { href: string; label?: string }): ReactElement {
+  const defaultOpenDestination = useCodexStore((state) => state.settings.defaultOpenDestination)
+
+  if (isLocalAbsolutePath(href)) {
+    return (
+      <button
+        type="button"
+        onClick={() => openLocalPath(href, defaultOpenDestination)}
+        className="truncate text-accent underline decoration-accent/60 underline-offset-2 hover:text-foreground transition-colors"
+        title={href}
+      >
+        {label || href}
+      </button>
+    )
+  }
+
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="truncate text-accent underline decoration-accent/60 underline-offset-2 hover:text-foreground transition-colors"
+      title={href}
+    >
+      {label || href}
+    </a>
+  )
+}
+
+function ToolCardFrame({
+  item,
+  eyebrow,
+  title,
+  accent,
+  secondary,
+  children
+}: {
+  item: MessageItem
+  eyebrow: string
+  title: ReactElement | string
+  accent?: ReactElement | string | null
+  secondary?: ReactElement | string | null
+  children?: ReactElement | null
+}): ReactElement {
+  const [open, setOpen] = useState(false)
+  const hasBody = Boolean(children)
+
+  return (
+    <div className="my-2">
+      <button
+        type="button"
+        onClick={() => hasBody && setOpen((prev) => !prev)}
+        disabled={!hasBody}
+        className={`group/tool flex w-full items-start justify-between gap-3 rounded-xl px-1 py-1.5 text-left ${
+          hasBody ? 'cursor-pointer' : 'cursor-default'
+        }`}
+      >
+        <div className="min-w-0 space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-ui-10 uppercase tracking-[0.18em] text-muted-foreground">
+              {eyebrow}
+            </span>
+            <ToolStatusPill status={item.status} />
+          </div>
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+            <div className="min-w-0 truncate text-[15px] font-medium text-foreground">{title}</div>
+            {accent && <div className="text-[14px] font-medium text-accent">{accent}</div>}
+          </div>
+          {secondary && (
+            <div className={`${UI_TEXT_SIZE_CLASS} min-w-0 truncate text-muted-foreground`}>
+              {secondary}
+            </div>
+          )}
+        </div>
+        {hasBody && (
+          <motion.div
+            animate={{ rotate: open ? 0 : -90 }}
+            transition={{ duration: 0.16, ease: 'easeInOut' }}
+            className="shrink-0 pt-1"
+          >
+            <ChevronDown className="h-4 w-4 text-muted-foreground transition-colors group-hover/tool:text-foreground" />
+          </motion.div>
+        )}
+      </button>
+      <AnimatePresence initial={false}>
+        {open && hasBody && (
+          <motion.div
+            key={`${item.id}:tool-body`}
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18, ease: 'easeInOut' }}
+            className="overflow-hidden"
+          >
+            <div className="ml-[7px] mt-1 space-y-3 border-l border-border/40 pl-4 py-1">
+              {children}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+function WebSearchItem({ item }: { item: MessageItem }): ReactElement {
+  const detailText = getDetailText(item)
+  const links = useMemo(
+    () => getUrlsFromText(item.resultText, item.output, item.argumentsText),
+    [item.argumentsText, item.output, item.resultText]
+  )
+
+  return (
+    <ToolCardFrame
+      item={item}
+      eyebrow="Web Search"
+      title={item.query || 'Search web'}
+      secondary={item.summary || item.actionTarget || null}
+    >
+      <>
+        {links.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="text-ui-10 uppercase tracking-[0.16em] text-muted-foreground">
+              Links
+            </div>
+            <div className="flex flex-col gap-1.5">
+              {links.slice(0, 6).map((link) => (
+                <ToolLink key={link} href={link} />
+              ))}
+            </div>
+          </div>
+        )}
+        <DetailSection title="Result" content={detailText} />
+        <DetailSection title="Arguments" content={item.argumentsText} />
+      </>
+    </ToolCardFrame>
+  )
+}
+
+function ImageViewItem({ item }: { item: MessageItem }): ReactElement {
+  const target = item.actionTarget || item.filePath || item.summary || 'Image'
+  const imageSrc = getImageSource(target)
+  const detailText = getDetailText(item)
+
+  return (
+    <ToolCardFrame item={item} eyebrow="Image" title={getBaseName(target)} secondary={target}>
+      <>
+        {imageSrc && (
+          <div className="overflow-hidden rounded-xl border border-border/70 bg-secondary/20">
+            <img
+              src={imageSrc}
+              alt={getBaseName(target)}
+              className="max-h-[240px] w-full object-contain bg-background"
+            />
+          </div>
+        )}
+        <DetailSection title="Result" content={detailText} />
+        <DetailSection title="Arguments" content={item.argumentsText} />
+      </>
+    </ToolCardFrame>
+  )
+}
+
+function GenericToolCard({
+  item,
+  eyebrow,
+  title,
+  secondary
+}: {
+  item: MessageItem
+  eyebrow: string
+  title: string
+  secondary?: string
+}): ReactElement {
+  const detailText = getDetailText(item)
+
+  return (
+    <ToolCardFrame
+      item={item}
+      eyebrow={eyebrow}
+      title={title}
+      secondary={secondary || item.summary || null}
+    >
+      <>
+        {item.linkedTaskIds && item.linkedTaskIds.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="text-ui-10 uppercase tracking-[0.16em] text-muted-foreground">
+              Linked Tasks
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {item.linkedTaskIds.map((taskId) => (
+                <span
+                  key={taskId}
+                  className="rounded-full bg-secondary px-2 py-1 text-ui-11 font-mono text-muted-foreground"
+                >
+                  {taskId}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+        <DetailSection title="Arguments" content={item.argumentsText} />
+        <DetailSection title="Result" content={detailText} />
+      </>
+    </ToolCardFrame>
+  )
+}
+
+function StateEventItem({ item }: { item: MessageItem }): ReactElement | null {
+  const label = getCompactLabel(item)
+  const detail = item.summary || item.content || item.output || ''
+  if (!label && !detail) return null
+
+  return (
+    <div className="my-2 rounded-xl border border-border/60 bg-secondary/25 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-ui-10 uppercase tracking-[0.18em] text-muted-foreground">State</span>
+        <span className={`${UI_TEXT_SIZE_CLASS} font-medium text-foreground`}>{label}</span>
+      </div>
+      {detail && (
+        <div
+          className={`${UI_TEXT_SIZE_CLASS} mt-1.5 whitespace-pre-wrap leading-relaxed text-muted-foreground`}
+        >
+          {detail}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function getEditDisplayContent(item: MessageItem): string {
@@ -789,15 +1123,50 @@ function ItemRenderer({ item }: { item: MessageItem }): ReactElement | null {
         </details>
       )
 
-    case 'toolCall':
-    case 'mcpToolCall':
-    case 'dynamicToolCall':
-    case 'collabToolCall':
     case 'webSearch':
+      return <WebSearchItem item={item} />
+
     case 'imageView':
+      return <ImageViewItem item={item} />
+
+    case 'mcpToolCall':
+      return (
+        <GenericToolCard
+          item={item}
+          eyebrow="MCP Tool"
+          title={
+            item.server ? `${item.server}.${item.toolName || 'tool'}` : item.toolName || 'MCP tool'
+          }
+          secondary={item.summary}
+        />
+      )
+
+    case 'dynamicToolCall':
+      return (
+        <GenericToolCard
+          item={item}
+          eyebrow="Dynamic Tool"
+          title={item.toolName || item.summary || 'Client tool'}
+          secondary={item.summary}
+        />
+      )
+
+    case 'collabToolCall':
+      return (
+        <GenericToolCard
+          item={item}
+          eyebrow="Collaboration"
+          title={item.summary || item.toolName || 'Collaboration tool'}
+          secondary={item.toolName && item.summary !== item.toolName ? item.toolName : undefined}
+        />
+      )
+
     case 'contextCompaction':
     case 'enteredReviewMode':
     case 'exitedReviewMode':
+      return <StateEventItem item={item} />
+
+    case 'toolCall':
     case 'unknown': {
       if (isEditLikeToolCall(item)) {
         return <FileChangeItem item={item} />
@@ -960,60 +1329,6 @@ function getGroupSummary(items: MessageItem[]): string {
     .join(', ')
 }
 
-function ToolCallGroupItem({ item }: { item: MessageItem }): ReactElement {
-  const [detailOpen, setDetailOpen] = useState(false)
-  const label = getCompactLabel(item)
-  const hasDetail = Boolean(item.output || item.content || item.resultText)
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, x: -4 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ duration: 0.2, ease: ANIMATION_EASE }}
-    >
-      <button
-        type="button"
-        onClick={() => hasDetail && setDetailOpen((prev) => !prev)}
-        disabled={!hasDetail}
-        className={`w-full flex items-center gap-2 py-0.5 text-left ${UI_TEXT_SIZE_CLASS} font-mono truncate ${
-          item.completed ? 'text-muted-foreground' : 'text-foreground/80'
-        } ${hasDetail ? 'hover:text-foreground transition-colors' : ''}`}
-      >
-        {item.completed ? (
-          <Check className="w-3 h-3 text-muted-foreground/50 shrink-0" />
-        ) : (
-          <motion.span
-            className="w-3 h-3 flex items-center justify-center shrink-0"
-            animate={{ opacity: [0.3, 1, 0.3] }}
-            transition={{ duration: 1, repeat: Infinity }}
-          >
-            <span className="h-1.5 w-1.5 rounded-full bg-foreground/60" />
-          </motion.span>
-        )}
-        <span className="truncate">{label}</span>
-      </button>
-      <AnimatePresence initial={false}>
-        {detailOpen && hasDetail && (
-          <motion.div
-            key="detail"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.15, ease: 'easeInOut' }}
-            className="overflow-hidden"
-          >
-            <div
-              className={`ml-5 mt-1 mb-2 max-h-[200px] overflow-auto rounded-md bg-secondary/40 px-3 py-2 ${UI_TEXT_SIZE_CLASS} font-mono text-muted-foreground whitespace-pre-wrap`}
-            >
-              {item.output || item.resultText || item.content}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </motion.div>
-  )
-}
-
 function ToolCallGroup({ items }: { items: MessageItem[] }): ReactElement {
   const allCompleted = items.every((i) => i.completed)
   const [expanded, setExpanded] = useState(false)
@@ -1067,7 +1382,9 @@ function ToolCallGroup({ items }: { items: MessageItem[] }): ReactElement {
           >
             <div className={DISCLOSURE_BODY_CLASS}>
               {items.map((item) => (
-                <ToolCallGroupItem key={item.id} item={item} />
+                <div key={item.id} id={`transcript-item-${item.id}`}>
+                  <ItemRenderer item={item} />
+                </div>
               ))}
             </div>
           </motion.div>

@@ -2,7 +2,7 @@ import type { ReactElement } from 'react'
 import { useCodexStore } from '@/lib/store'
 
 export default function StatusBar(): ReactElement {
-  const { activeProject } = useCodexStore()
+  const { activeProject, settings, updateSettings } = useCodexStore()
 
   return (
     <div className="h-6 flex items-center justify-between px-3 border-t border-border bg-background text-ui-11 text-muted-foreground shrink-0">
@@ -70,8 +70,14 @@ export default function StatusBar(): ReactElement {
           main
         </button>
 
-        {/* Terminal */}
-        <button className="flex items-center gap-1 hover:text-foreground transition-colors">
+        {/* Terminal toggle */}
+        <button
+          onClick={() => updateSettings({ isTerminalOpen: !settings.isTerminalOpen })}
+          className={`flex items-center gap-1 hover:text-foreground transition-colors ${
+            settings.isTerminalOpen ? 'text-accent-foreground' : ''
+          }`}
+          title={`${settings.isTerminalOpen ? 'Hide' : 'Show'} Terminal (⌘.)`}
+        >
           <svg
             viewBox="0 0 24 24"
             fill="none"

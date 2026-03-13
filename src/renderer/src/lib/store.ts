@@ -239,6 +239,8 @@ export interface AppSettings {
   opaqueWindowBackground: boolean
   chatSidebarWidth: number
   settingsSidebarWidth: number
+  isTerminalOpen: boolean
+  terminalWidth: number
   pointerCursors: boolean
   sansFontSize: number
   sansFontFamily: string
@@ -562,6 +564,8 @@ export const useCodexStore = create<CodexStore>()((set, get) => ({
     opaqueWindowBackground: false,
     chatSidebarWidth: 260,
     settingsSidebarWidth: 248,
+    isTerminalOpen: false,
+    terminalWidth: 480,
     pointerCursors: true,
     sansFontSize: 14,
     sansFontFamily: 'System',
